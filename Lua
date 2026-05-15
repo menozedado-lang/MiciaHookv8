@@ -1,220 +1,953 @@
---// Services
-local RunService = game:GetService("RunService")
-local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
+--[[
+    ██╗   ██╗ ██████╗ ██╗██████╗      ██████╗  ██████╗ ██████╗ 
+    ██║   ██║██╔═══██╗██║██╔══██╗    ██╔════╝ ██╔═══██╗██╔══██╗
+    ██║   ██║██║   ██║██║██║  ██║    ██║  ███╗██║   ██║██║  ██║
+    ╚██╗ ██╔╝██║   ██║██║██║  ██║    ██║   ██║██║   ██║██║  ██║
+     ╚████╔╝ ╚██████╔╝██║██████╔╝    ╚██████╔╝╚██████╔╝██████╔╝
+      ╚═══╝   ╚═════╝ ╚═╝╚═════╝      ╚═════╝  ╚═════╝ ╚═════╝ 
+    
+    void god — internal build
+    author  : yux
+    version : 3.0.0
+]]
 
-local VoidCFrame = CFrame.new(9000, 9000, 9000)
-local trackedParts = {}
-local playerName = LocalPlayer.Name:lower()
+-- ────────────────────────────────────────────────────────────
+--  STRICT ENVIRONMENT GUARD
+-- ────────────────────────────────────────────────────────────
+assert(
+    type(getrawmetatable) == "function" and
+    type(setreadonly)     == "function" and
+    type(newcclosure)     == "function",
+    "[voidgod] unsupported executor — needs getrawmetatable / setreadonly / newcclosure"
+)
 
-local features = {
-    VoidSpam = true,
+-- ────────────────────────────────────────────────────────────
+--  SERVICES  (cache once, never re-index)
+-- ────────────────────────────────────────────────────────────
+local RunService       = game:GetService("RunService")
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local StarterGui       = game:GetService("StarterGui")
+
+local LP        = Players.LocalPlayer
+local Camera    = workspace.CurrentCamera
+
+-- ────────────────────────────────────────────────────────────
+--  CONSTANTS
+-- ────────────────────────────────────────────────────────────
+local VOID_CF          = CFrame.new(9e3, 9e3, 9e3)
+local VOID_V3          = Vector3.new(9e3, 9e3, 9e3)
+local ZERO_V3          = Vector3.zero
+local INF_V3           = Vector3.new(1/0, 1/0, 1/0)
+local PROJ_SPEED_THRESH = 40
+local ANTI_CLOSE_DIST  = 20
+local ANTI_CLOSE_PUSH  = 60
+local WHIRL_RADIUS     = 1.2
+local WHIRL_SPEED_DEG  = 100  -- degrees per RenderStepped
+
+-- ────────────────────────────────────────────────────────────
+--  CENTRAL STATE
+-- ────────────────────────────────────────────────────────────
+local State = {
+    -- feature toggles
+    VoidSpam    = true,
     SlingBypass = true,
-    DaggerBypass = true,
-    AntiClose = true
+    DaggerBypass= true,
+    AntiClose   = true,
+    Whirl       = false,
+
+    -- runtime
+    trackedParts  = {},   -- BaseParts to void every frame
+    bypassHooked  = false,
+    whirlConn     = nil,
+    whirlTarget   = nil,
+    whirlBV       = nil,
+    whirlBG       = nil,
+    whirlAngle    = 0,
 }
 
---// Your Strong Projectile Tracking
-workspace.ChildAdded:Connect(function(obj)
-    if not obj:IsA("BasePart") and not obj:IsA("MeshPart") then return end
+-- ────────────────────────────────────────────────────────────
+--  UTILITY
+-- ────────────────────────────────────────────────────────────
+local function safeCall(fn, ...)
+    local ok, err = pcall(fn, ...)
+    if not ok then
+        warn("[voidgod] pcall failed: " .. tostring(err))
+    end
+end
+
+local function notify(title, text, duration)
+    safeCall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title    = title,
+            Text     = text,
+            Duration = duration or 4,
+        })
+    end)
+end
+
+local function getLpChar()
+    local char = LP.Character
+    if not char then return nil, nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    return char, hrp
+end
+
+local function getHum(char)
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+-- Returns the nearest enemy Player or nil
+local function getNearestEnemy()
+    local _, myHRP = getLpChar()
+    if not myHRP then return nil end
+    local myPos   = myHRP.Position
+    local best, bestDSq = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP then
+            local chr = p.Character
+            local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local dSq = (hrp.Position - myPos).Magnitude ^ 2
+                if dSq < bestDSq then bestDSq = dSq best = p end
+            end
+        end
+    end
+    return best
+end
+
+-- ────────────────────────────────────────────────────────────
+--  PROJECTILE TRACKER
+-- ────────────────────────────────────────────────────────────
+local function onChildAdded(obj)
+    if not (obj:IsA("BasePart") or obj:IsA("MeshPart")) then return end
     if obj.Name == "CoreProjectile" then
-        trackedParts[obj] = true
+        State.trackedParts[obj] = true
     elseif obj.Name == "Part" then
         task.defer(function()
-            if obj and obj.Parent and obj.AssemblyLinearVelocity.Magnitude > 40 then
-                trackedParts[obj] = true
+            if obj and obj.Parent
+               and obj.AssemblyLinearVelocity.Magnitude > PROJ_SPEED_THRESH then
+                State.trackedParts[obj] = true
             end
         end)
     end
-end)
+end
 
-workspace.ChildRemoved:Connect(function(obj)
-    trackedParts[obj] = nil
-end)
+local function onChildRemoved(obj)
+    State.trackedParts[obj] = nil
+end
 
---// STRONG VOID SPAM (Using your method + improvements)
-local function strongVoid()
-    if not features.VoidSpam then return end
-    pcall(function()
-        -- Void Enemy Players
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer and plr.Character then
-                local root = plr.Character:FindFirstChild("HumanoidRootPart")
-                if root then
-                    root.CFrame = VoidCFrame
-                    root.AssemblyLinearVelocity = Vector3.zero
-                    root.AssemblyAngularVelocity = Vector3.zero
-                    root.Velocity = Vector3.zero
+workspace.ChildAdded:Connect(onChildAdded)
+workspace.ChildRemoved:Connect(onChildRemoved)
+
+-- ────────────────────────────────────────────────────────────
+--  VOID SPAM
+-- ────────────────────────────────────────────────────────────
+local function tickVoidSpam()
+    if not State.VoidSpam then return end
+    safeCall(function()
+        -- void enemy players
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LP then
+                local chr = p.Character
+                if chr then
+                    local hrp = chr:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        hrp.CFrame = VOID_CF
+                        hrp.AssemblyLinearVelocity  = ZERO_V3
+                        hrp.AssemblyAngularVelocity = ZERO_V3
+                    end
                 end
-                
-                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-                if hum then hum.Health = 0 end
             end
         end
 
-        -- Void Projectiles in workspace
+        -- void CoreProjectile children of workspace
         for _, obj in ipairs(workspace:GetChildren()) do
-            if (obj:IsA("BasePart") or obj:IsA("MeshPart")) and obj.Name == "CoreProjectile" then
-                obj.CFrame = VoidCFrame
-                obj.AssemblyLinearVelocity = Vector3.zero
+            if (obj:IsA("BasePart") or obj:IsA("MeshPart"))
+               and obj.Name == "CoreProjectile" then
+                obj.CFrame = VOID_CF
+                obj.AssemblyLinearVelocity = ZERO_V3
             end
         end
 
-        -- Void Tracked Fast Projectiles
-        for part in pairs(trackedParts) do
+        -- void tracked fast parts
+        for part in pairs(State.trackedParts) do
             if part and part.Parent then
-                part.CFrame = VoidCFrame
-                part.AssemblyLinearVelocity = Vector3.zero
-                part.AssemblyAngularVelocity = Vector3.zero
+                part.CFrame = VOID_CF
+                part.AssemblyLinearVelocity  = ZERO_V3
+                part.AssemblyAngularVelocity = ZERO_V3
             else
-                trackedParts[part] = nil
+                State.trackedParts[part] = nil
             end
         end
     end)
 end
 
-RunService.Heartbeat:Connect(strongVoid)
+-- ────────────────────────────────────────────────────────────
+--  AUTO SHOOT  (sling / dagger / throw weapons)
+-- ────────────────────────────────────────────────────────────
+local SHOOT_NAMES = {
+    "shoot", "fire", "throw", "attack", "cast", "launch"
+}
 
---// Reliable Auto Shoot (Especially for Sling)
-local function autoShoot()
-    pcall(function()
-        local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+local function tickAutoShoot()
+    safeCall(function()
+        local char = LP.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
         if not tool then return end
 
-        local toolName = tool.Name:lower()
-        if not (toolName:find("sling") or toolName:find("dagger") or toolName:find("knife") 
-                or toolName:find("blade") or toolName:find("throw")) then return end
+        local tn = tool.Name:lower()
+        if not (tn:find("sling") or tn:find("dagger") or tn:find("knife")
+             or tn:find("blade") or tn:find("throw")) then return end
 
-        -- Force activate
         tool:Activate()
 
-        -- Fire every possible remote
         for _, v in ipairs(tool:GetDescendants()) do
             if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
                 local n = v.Name:lower()
-                if n:find("shoot") or n:find("fire") or n:find("throw") or n:find("attack") 
-                   or n:find("cast") or n:find("launch") then
-                    pcall(function() v:FireServer() end)
+                for _, kw in ipairs(SHOOT_NAMES) do
+                    if n:find(kw) then
+                        safeCall(function() v:FireServer() end)
+                        break
+                    end
                 end
             end
         end
     end)
 end
 
-RunService.Heartbeat:Connect(autoShoot)
+-- ────────────────────────────────────────────────────────────
+--  ANTI CLOSE
+-- ────────────────────────────────────────────────────────────
+local function tickAntiClose()
+    if not State.AntiClose then return end
+    safeCall(function()
+        local char, hrp = getLpChar()
+        if not hrp then return end
+        local myPos = hrp.Position
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LP then
+                local ehr = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+                if ehr and (ehr.Position - myPos).Magnitude < ANTI_CLOSE_DIST then
+                    hrp.CFrame = hrp.CFrame
+                        + hrp.CFrame.LookVector * ANTI_CLOSE_PUSH
+                        + Vector3.new(0, 30, 0)
+                    break
+                end
+            end
+        end
+    end)
+end
 
---// Improved Sling + Dagger Bypass
-local function applyBypass()
-    pcall(function()
-        local mt = getrawmetatable(game)
+-- ────────────────────────────────────────────────────────────
+--  METATBLE BYPASS  (sling + dagger remote filter)
+-- ────────────────────────────────────────────────────────────
+local function applyMetatableBypass()
+    if State.bypassHooked then return end
+    safeCall(function()
+        local mt  = getrawmetatable(game)
         local old = mt.__namecall
         setreadonly(mt, false)
+
+        local lpName = LP.Name:lower()
 
         mt.__namecall = newcclosure(function(self, ...)
             local method = getnamecallmethod()
             if method == "FireServer" then
                 local args = {...}
-                local remoteName = self.Name:lower()
-                local argStr = tostring(args[1] or ""):lower()
+                local rn   = self.Name:lower()
+                local a1   = tostring(args[1] or ""):lower()
 
-                -- SLING BYPASS (Stronger)
-                if features.SlingBypass and (remoteName:find("sling") or remoteName:find("shoot") or argStr:find("sling")) then
-                    if argStr:find(playerName) or argStr:find("owner") or argStr:find("self") or #args <= 3 then
-                        return old(self, ...)  -- Allow your shots
-                    else
-                        return  -- Block anti-cheat checks
+                if State.SlingBypass
+                   and (rn:find("sling") or rn:find("shoot") or a1:find("sling")) then
+                    if a1:find(lpName) or a1:find("owner") or a1:find("self") or #args <= 3 then
+                        return old(self, ...)
                     end
+                    return
                 end
 
-                -- DAGGER BYPASS
-                if features.DaggerBypass and (remoteName:find("dagger") or remoteName:find("knife") 
-                    or remoteName:find("throw") or remoteName:find("blade")) then
-                    if argStr:find(playerName) or argStr:find("owner") then
+                if State.DaggerBypass
+                   and (rn:find("dagger") or rn:find("knife")
+                     or rn:find("throw")  or rn:find("blade")) then
+                    if a1:find(lpName) or a1:find("owner") then
                         return old(self, ...)
-                    else
-                        return
                     end
+                    return
                 end
             end
             return old(self, ...)
         end)
 
         setreadonly(mt, true)
+        State.bypassHooked = true
     end)
 end
 
-applyBypass()
+-- ────────────────────────────────────────────────────────────
+--  WHIRL (orbit + fling closest enemy)
+-- ────────────────────────────────────────────────────────────
+local function stopWhirl()
+    State.Whirl = false
+    if State.whirlConn then
+        State.whirlConn:Disconnect()
+        State.whirlConn = nil
+    end
+    safeCall(function()
+        if State.whirlBV and State.whirlBV.Parent then State.whirlBV:Destroy() end
+        if State.whirlBG and State.whirlBG.Parent then State.whirlBG:Destroy() end
+    end)
+    State.whirlBV     = nil
+    State.whirlBG     = nil
+    State.whirlTarget = nil
+    State.whirlAngle  = 0
 
---// Anti Close
-local function antiClose()
-    if not features.AntiClose then return end
-    local character = LocalPlayer.Character
-    if not character or not character:FindFirstChild("HumanoidRootPart") then return end
-    local hrp = character.HumanoidRootPart
+    safeCall(function()
+        local char = LP.Character
+        local hum  = getHum(char)
+        if hum then
+            hum:SetStateEnabled(Enum.HumanoidStateType.Seated,     true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.Climbing,    true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.Jumping,     true)
+            hum.PlatformStand = false
+        end
+        Camera.CameraSubject = hum
+    end)
+end
 
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-            if (hrp.Position - plr.Character.HumanoidRootPart.Position).Magnitude < 20 then
-                hrp.CFrame = hrp.CFrame + hrp.CFrame.LookVector * 60 + Vector3.new(0, 30, 0)
-                break
-            end
+local function startWhirl()
+    local target = getNearestEnemy()
+    if not target then
+        notify("Whirl", "No target found", 3)
+        return
+    end
+
+    local char, hrp = getLpChar()
+    local hum       = getHum(char)
+    if not hrp or not hum then return end
+
+    -- wait for target char
+    local tChar = target.Character
+    local deadline = tick() + 3
+    while not (tChar and tChar:FindFirstChild("HumanoidRootPart")
+                      and tChar:FindFirstChild("Head")) do
+        if tick() > deadline then
+            notify("Whirl", "Target character not ready", 3)
+            return
+        end
+        task.wait()
+        tChar = target.Character
+    end
+
+    -- disable humanoid states
+    hum:SetStateEnabled(Enum.HumanoidStateType.Seated,     false)
+    hum:SetStateEnabled(Enum.HumanoidStateType.Climbing,   false)
+    hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown,false)
+    hum:SetStateEnabled(Enum.HumanoidStateType.Jumping,    false)
+    hum.PlatformStand = true
+
+    -- create physics objects
+    local bv = Instance.new("BodyVelocity")
+    bv.Velocity  = ZERO_V3
+    bv.MaxForce  = INF_V3
+    bv.Parent    = hrp
+
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = INF_V3
+    bg.Parent    = hrp
+
+    State.whirlBV     = bv
+    State.whirlBG     = bg
+    State.whirlTarget = target
+    State.Whirl       = true
+    State.whirlAngle  = 0
+
+    State.whirlConn = RunService.RenderStepped:Connect(function()
+        local tChr  = State.whirlTarget and State.whirlTarget.Character
+        local tRoot = tChr and tChr:FindFirstChild("HumanoidRootPart")
+        local tHead = tChr and tChr:FindFirstChild("Head")
+        local tHum  = tChr and tChr:FindFirstChildOfClass("Humanoid")
+
+        if not tRoot or not tHum or tHum.Health <= 0 then
+            stopWhirl()
+            return
+        end
+
+        State.whirlAngle = State.whirlAngle + math.rad(WHIRL_SPEED_DEG)
+
+        local cx = math.cos(State.whirlAngle) * WHIRL_RADIUS
+        local cz = math.sin(State.whirlAngle) * WHIRL_RADIUS
+
+        local dest = Vector3.new(
+            tRoot.Position.X + cx,
+            tRoot.Position.Y,
+            tRoot.Position.Z + cz
+        )
+
+        hrp.CFrame = CFrame.new(dest) * CFrame.Angles(0, State.whirlAngle, 0)
+        hrp.AssemblyLinearVelocity  = ZERO_V3
+        hrp.AssemblyAngularVelocity = ZERO_V3
+
+        if tHead then
+            Camera.CameraSubject = tHead
+            Camera.CFrame = CFrame.new(Camera.CFrame.Position, tHead.Position)
+            bg.CFrame = CFrame.lookAt(hrp.Position, tHead.Position)
+        end
+
+        -- fling velocity
+        bv.Velocity = Vector3.new(9e8, 9e8, 9e8)
+    end)
+
+    notify("Whirl", "Target: " .. target.Name .. "  |  X to stop", 5)
+end
+
+-- ────────────────────────────────────────────────────────────
+--  HEARTBEAT MASTER LOOP
+-- ────────────────────────────────────────────────────────────
+RunService.Heartbeat:Connect(function()
+    tickVoidSpam()
+    tickAutoShoot()
+    tickAntiClose()
+end)
+
+-- ────────────────────────────────────────────────────────────
+--  KEYBIND  (X = stop whirl)
+-- ────────────────────────────────────────────────────────────
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.X and State.Whirl then
+        stopWhirl()
+        notify("Whirl", "Stopped", 2)
+    end
+end)
+
+-- ────────────────────────────────────────────────────────────
+--  APPLY BYPASS ON LOAD
+-- ────────────────────────────────────────────────────────────
+applyMetatableBypass()
+
+-- ────────────────────────────────────────────────────────────
+--  CARTOON UI
+--  Colour palette  ─  deep purple bg, candy accents
+-- ────────────────────────────────────────────────────────────
+local PAL = {
+    bg       = Color3.fromRGB(28,  18,  48),
+    panel    = Color3.fromRGB(38,  26,  68),
+    accent   = Color3.fromRGB(130, 80, 255),
+    accentHi = Color3.fromRGB(180,130, 255),
+    on       = Color3.fromRGB( 80, 255, 140),
+    off      = Color3.fromRGB( 60,  60,  90),
+    text     = Color3.fromRGB(240, 230, 255),
+    subtext  = Color3.fromRGB(160, 140, 200),
+    shadow   = Color3.fromRGB( 10,   6,  22),
+    whirl    = Color3.fromRGB(255, 80,  180),
+    whirlOff = Color3.fromRGB( 80,  30,  70),
+}
+
+-- ── helpers ──────────────────────────────────────────────────
+
+local function corner(parent, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius or 14)
+    c.Parent = parent
+    return c
+end
+
+local function stroke(parent, color, thickness)
+    local s = Instance.new("UIStroke")
+    s.Color     = color or PAL.accent
+    s.Thickness = thickness or 2
+    s.Parent    = parent
+    return s
+end
+
+local function shadow(parent)
+    -- fake drop-shadow via a slightly larger, semi-transparent frame behind
+    local sh = Instance.new("Frame")
+    sh.Size              = UDim2.new(1, 8, 1, 8)
+    sh.Position          = UDim2.new(0, -4, 0, 4)
+    sh.BackgroundColor3  = PAL.shadow
+    sh.BackgroundTransparency = 0.55
+    sh.BorderSizePixel   = 0
+    sh.ZIndex            = parent.ZIndex - 1
+    sh.Parent            = parent.Parent
+    corner(sh, 16)
+    -- reparent so it draws under
+    sh.Parent = parent.Parent
+    parent.Parent = parent.Parent  -- no-op, just ordering clarity
+    return sh
+end
+
+local function label(parent, text, size, color, font, xAlign)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text               = text
+    l.TextColor3         = color  or PAL.text
+    l.Font               = font   or Enum.Font.GothamBold
+    l.TextSize           = size   or 15
+    l.TextXAlignment     = xAlign or Enum.TextXAlignment.Left
+    l.Parent             = parent
+    return l
+end
+
+local function tween(obj, props, t, style, dir)
+    TweenService:Create(obj,
+        TweenInfo.new(t or 0.18, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out),
+        props
+    ):Play()
+end
+
+-- ── root gui ─────────────────────────────────────────────────
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name         = "VoidGodGui"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent       = LP:WaitForChild("PlayerGui")
+
+-- ── main window ──────────────────────────────────────────────
+
+local WIN_W, WIN_H = 360, 420
+
+local Main = Instance.new("Frame")
+Main.Name               = "Main"
+Main.Size               = UDim2.fromOffset(WIN_W, WIN_H)
+Main.Position           = UDim2.new(0.5, -WIN_W/2, 0.5, -WIN_H/2)
+Main.BackgroundColor3   = PAL.bg
+Main.BorderSizePixel    = 0
+Main.Active             = true
+Main.Draggable          = true
+Main.ClipsDescendants   = false
+Main.Parent             = ScreenGui
+corner(Main, 18)
+stroke(Main, PAL.accent, 2.5)
+shadow(Main)
+
+-- ── decorative top gradient bar ──────────────────────────────
+
+local TopBar = Instance.new("Frame")
+TopBar.Size             = UDim2.new(1, 0, 0, 56)
+TopBar.BackgroundColor3 = PAL.panel
+TopBar.BorderSizePixel  = 0
+TopBar.ZIndex           = 2
+TopBar.Parent           = Main
+corner(TopBar, 18)
+-- hide bottom corners of topbar
+local TopBarFill = Instance.new("Frame")
+TopBarFill.Size             = UDim2.new(1, 0, 0.5, 0)
+TopBarFill.Position         = UDim2.fromScale(0, 0.5)
+TopBarFill.BackgroundColor3 = PAL.panel
+TopBarFill.BorderSizePixel  = 0
+TopBarFill.ZIndex           = 2
+TopBarFill.Parent           = TopBar
+
+local uiGrad = Instance.new("UIGradient")
+uiGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0,   Color3.fromRGB(100, 50, 220)),
+    ColorSequenceKeypoint.new(1,   Color3.fromRGB(200, 80, 255)),
+})
+uiGrad.Rotation = 90
+uiGrad.Parent   = TopBar
+
+-- animated shimmer on topbar
+task.spawn(function()
+    local t = 0
+    while Main and Main.Parent do
+        t = (t + 0.012) % 1
+        uiGrad.Offset = Vector2.new(t * 0.6, 0)
+        task.wait()
+    end
+end)
+
+-- ── title ────────────────────────────────────────────────────
+
+local TitleLbl = Instance.new("TextLabel")
+TitleLbl.Size                = UDim2.new(1, -16, 1, 0)
+TitleLbl.Position            = UDim2.fromOffset(16, 0)
+TitleLbl.BackgroundTransparency = 1
+TitleLbl.Text                = "✦  VOID GOD  ✦"
+TitleLbl.TextColor3          = Color3.new(1,1,1)
+TitleLbl.Font                = Enum.Font.GothamBlack
+TitleLbl.TextSize            = 22
+TitleLbl.TextXAlignment      = Enum.TextXAlignment.Left
+TitleLbl.ZIndex              = 3
+TitleLbl.Parent              = TopBar
+
+local SubLbl = Instance.new("TextLabel")
+SubLbl.Size                  = UDim2.new(1, -16, 0, 16)
+SubLbl.Position              = UDim2.new(0, 16, 1, -18)
+SubLbl.BackgroundTransparency= 1
+SubLbl.Text                  = LP.Name .. "  ·  v3.0"
+SubLbl.TextColor3            = PAL.subtext
+SubLbl.Font                  = Enum.Font.Gotham
+SubLbl.TextSize              = 12
+SubLbl.TextXAlignment        = Enum.TextXAlignment.Left
+SubLbl.ZIndex                = 3
+SubLbl.Parent                = TopBar
+
+-- ── close button ─────────────────────────────────────────────
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size               = UDim2.fromOffset(30, 30)
+CloseBtn.Position           = UDim2.new(1, -38, 0, 12)
+CloseBtn.BackgroundColor3   = Color3.fromRGB(200, 50, 80)
+CloseBtn.Text               = "✕"
+CloseBtn.TextColor3         = Color3.new(1,1,1)
+CloseBtn.Font               = Enum.Font.GothamBold
+CloseBtn.TextSize           = 14
+CloseBtn.ZIndex             = 4
+CloseBtn.Parent             = TopBar
+corner(CloseBtn, 8)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    tween(Main, {Size = UDim2.fromOffset(WIN_W, 0), Position = UDim2.new(0.5,-WIN_W/2,0.5,0)}, 0.22)
+    task.delay(0.25, function() ScreenGui:Destroy() end)
+end)
+
+-- ── scroll container for buttons ─────────────────────────────
+
+local Scroll = Instance.new("ScrollingFrame")
+Scroll.Size                  = UDim2.new(1, -20, 1, -72)
+Scroll.Position              = UDim2.fromOffset(10, 62)
+Scroll.BackgroundTransparency= 1
+Scroll.BorderSizePixel       = 0
+Scroll.ScrollBarThickness    = 4
+Scroll.ScrollBarImageColor3  = PAL.accentHi
+Scroll.CanvasSize            = UDim2.fromOffset(0, 0)
+Scroll.AutomaticCanvasSize   = Enum.AutomaticSize.Y
+Scroll.Parent                = Main
+
+local ListLayout = Instance.new("UIListLayout")
+ListLayout.SortOrder         = Enum.SortOrder.LayoutOrder
+ListLayout.Padding           = UDim.new(0, 10)
+ListLayout.Parent            = Scroll
+
+local ListPad = Instance.new("UIPadding")
+ListPad.PaddingTop           = UDim.new(0, 6)
+ListPad.PaddingBottom        = UDim.new(0, 6)
+ListPad.PaddingLeft          = UDim.new(0, 2)
+ListPad.PaddingRight         = UDim.new(0, 2)
+ListPad.Parent               = Scroll
+
+-- ── toggle button factory ─────────────────────────────────────
+--[[
+    Each toggle is a "card":
+      ┌─────────────────────────────────────────────┐
+      │  [icon]  Title            [pill ON/OFF]      │
+      │  Description subtitle                        │
+      └─────────────────────────────────────────────┘
+]]
+
+local function makeToggle(cfg)
+    --[[
+        cfg = {
+            icon      = "☠",
+            title     = "VOID SPAM",
+            sub       = "Teleports enemies + projectiles",
+            stateKey  = "VoidSpam",      -- key in State
+            order     = 1,
+            onToggle  = function(enabled) end,   -- optional extra callback
+        }
+    ]]
+
+    local card = Instance.new("Frame")
+    card.LayoutOrder        = cfg.order
+    card.Size               = UDim2.new(1, 0, 0, 70)
+    card.BackgroundColor3   = PAL.panel
+    card.BorderSizePixel    = 0
+    card.Parent             = Scroll
+    corner(card, 14)
+    stroke(card, PAL.accent, 1.5)
+
+    -- icon circle
+    local iconCircle = Instance.new("Frame")
+    iconCircle.Size             = UDim2.fromOffset(44, 44)
+    iconCircle.Position         = UDim2.fromOffset(12, 13)
+    iconCircle.BackgroundColor3 = PAL.accent
+    iconCircle.BorderSizePixel  = 0
+    iconCircle.Parent           = card
+    corner(iconCircle, 12)
+
+    local iconLbl = Instance.new("TextLabel")
+    iconLbl.Size               = UDim2.fromScale(1, 1)
+    iconLbl.BackgroundTransparency = 1
+    iconLbl.Text               = cfg.icon
+    iconLbl.TextColor3         = Color3.new(1,1,1)
+    iconLbl.Font               = Enum.Font.GothamBold
+    iconLbl.TextSize           = 22
+    iconLbl.Parent             = iconCircle
+
+    -- title
+    local titleLbl = label(card, cfg.title, 16, PAL.text, Enum.Font.GothamBold)
+    titleLbl.Size     = UDim2.new(1, -130, 0, 20)
+    titleLbl.Position = UDim2.fromOffset(66, 14)
+
+    -- subtitle
+    local subLbl = label(card, cfg.sub, 12, PAL.subtext, Enum.Font.Gotham)
+    subLbl.Size     = UDim2.new(1, -130, 0, 16)
+    subLbl.Position = UDim2.fromOffset(66, 36)
+    subLbl.TextWrapped = true
+
+    -- pill toggle
+    local pill = Instance.new("Frame")
+    pill.Size             = UDim2.fromOffset(64, 30)
+    pill.Position         = UDim2.new(1, -76, 0.5, -15)
+    pill.BackgroundColor3 = State[cfg.stateKey] and PAL.on or PAL.off
+    pill.BorderSizePixel  = 0
+    pill.Parent           = card
+    corner(pill, 15)
+
+    local pillTxt = Instance.new("TextLabel")
+    pillTxt.Size               = UDim2.fromScale(1,1)
+    pillTxt.BackgroundTransparency = 1
+    pillTxt.Text               = State[cfg.stateKey] and "ON" or "OFF"
+    pillTxt.TextColor3         = Color3.new(1,1,1)
+    pillTxt.Font               = Enum.Font.GothamBold
+    pillTxt.TextSize           = 13
+    pillTxt.Parent             = pill
+
+    -- knob inside pill
+    local knob = Instance.new("Frame")
+    knob.Size             = UDim2.fromOffset(22,22)
+    knob.Position         = State[cfg.stateKey]
+        and UDim2.fromOffset(38, 4)
+        or  UDim2.fromOffset(4,  4)
+    knob.BackgroundColor3 = Color3.new(1,1,1)
+    knob.BorderSizePixel  = 0
+    knob.Parent           = pill
+    corner(knob, 11)
+
+    -- invisible hit button over whole card
+    local hitBtn = Instance.new("TextButton")
+    hitBtn.Size               = UDim2.fromScale(1,1)
+    hitBtn.BackgroundTransparency = 1
+    hitBtn.Text               = ""
+    hitBtn.ZIndex             = 5
+    hitBtn.Parent             = card
+
+    local function refresh()
+        local on = State[cfg.stateKey]
+        tween(pill,  {BackgroundColor3 = on and PAL.on or PAL.off}, 0.15)
+        tween(knob,  {Position = on
+            and UDim2.fromOffset(38,4)
+            or  UDim2.fromOffset(4, 4)}, 0.15)
+        pillTxt.Text = on and "ON" or "OFF"
+        -- subtle card border flash
+        tween(card, {}, 0.05)
+    end
+
+    hitBtn.MouseButton1Click:Connect(function()
+        State[cfg.stateKey] = not State[cfg.stateKey]
+        refresh()
+        if cfg.onToggle then cfg.onToggle(State[cfg.stateKey]) end
+        -- bounce animation on icon circle
+        tween(iconCircle, {BackgroundColor3 = PAL.accentHi}, 0.08)
+        task.delay(0.12, function()
+            tween(iconCircle, {BackgroundColor3 = PAL.accent}, 0.12)
+        end)
+    end)
+
+    -- hover highlight
+    hitBtn.MouseEnter:Connect(function()
+        tween(card, {BackgroundColor3 = Color3.fromRGB(50,36,84)}, 0.12)
+    end)
+    hitBtn.MouseLeave:Connect(function()
+        tween(card, {BackgroundColor3 = PAL.panel}, 0.12)
+    end)
+
+    return card
+end
+
+-- ── whirl button (not a toggle — it's an action button) ──────
+local function makeWhirlButton()
+    local card = Instance.new("Frame")
+    card.LayoutOrder        = 5
+    card.Size               = UDim2.new(1, 0, 0, 70)
+    card.BackgroundColor3   = PAL.panel
+    card.BorderSizePixel    = 0
+    card.Parent             = Scroll
+    corner(card, 14)
+    stroke(card, PAL.whirl, 1.5)
+
+    local iconCircle = Instance.new("Frame")
+    iconCircle.Size             = UDim2.fromOffset(44, 44)
+    iconCircle.Position         = UDim2.fromOffset(12, 13)
+    iconCircle.BackgroundColor3 = PAL.whirl
+    iconCircle.BorderSizePixel  = 0
+    iconCircle.Parent           = card
+    corner(iconCircle, 12)
+
+    local iconLbl = Instance.new("TextLabel")
+    iconLbl.Size               = UDim2.fromScale(1,1)
+    iconLbl.BackgroundTransparency = 1
+    iconLbl.Text               = "🌀"
+    iconLbl.TextColor3         = Color3.new(1,1,1)
+    iconLbl.Font               = Enum.Font.GothamBold
+    iconLbl.TextSize            = 22
+    iconLbl.Parent             = iconCircle
+
+    local titleLbl = label(card, "WHIRL ORBIT", 16, PAL.text, Enum.Font.GothamBold)
+    titleLbl.Size     = UDim2.new(1,-130,0,20)
+    titleLbl.Position = UDim2.fromOffset(66,14)
+
+    local subLbl = label(card, "Orbit + fling nearest enemy  |  X to stop", 12, PAL.subtext, Enum.Font.Gotham)
+    subLbl.Size     = UDim2.new(1,-130,0,16)
+    subLbl.Position = UDim2.fromOffset(66,36)
+    subLbl.TextWrapped = true
+
+    local actionBtn = Instance.new("Frame")
+    actionBtn.Size             = UDim2.fromOffset(64,30)
+    actionBtn.Position         = UDim2.new(1,-76,0.5,-15)
+    actionBtn.BackgroundColor3 = PAL.whirlOff
+    actionBtn.BorderSizePixel  = 0
+    actionBtn.Parent           = card
+    corner(actionBtn, 10)
+
+    local actionTxt = Instance.new("TextLabel")
+    actionTxt.Size               = UDim2.fromScale(1,1)
+    actionTxt.BackgroundTransparency = 1
+    actionTxt.Text               = "START"
+    actionTxt.TextColor3         = Color3.new(1,1,1)
+    actionTxt.Font               = Enum.Font.GothamBold
+    actionTxt.TextSize           = 13
+    actionTxt.Parent             = actionBtn
+
+    local hitBtn = Instance.new("TextButton")
+    hitBtn.Size               = UDim2.fromScale(1,1)
+    hitBtn.BackgroundTransparency = 1
+    hitBtn.Text               = ""
+    hitBtn.ZIndex             = 5
+    hitBtn.Parent             = card
+
+    local function refreshWhirlBtn()
+        if State.Whirl then
+            tween(actionBtn, {BackgroundColor3 = PAL.whirl}, 0.15)
+            actionTxt.Text = "STOP"
+            tween(stroke(card, PAL.whirl, 2), {}, 0)
+        else
+            tween(actionBtn, {BackgroundColor3 = PAL.whirlOff}, 0.15)
+            actionTxt.Text = "START"
         end
     end
-end
-RunService.Heartbeat:Connect(antiClose)
 
---// GUI
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.ResetOnSpawn = false
-ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
-
-local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 340, 0, 300)
-MainFrame.Position = UDim2.new(0.5, -170, 0.5, -150)
-MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
-MainFrame.Active = true
-MainFrame.Draggable = true
-MainFrame.Parent = ScreenGui
-
-Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0,12)
-
-local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1,0,0,50)
-Title.BackgroundTransparency = 1
-Title.Text = playerName:upper() .. " [VOID GOD]"
-Title.TextColor3 = Color3.new(1,1,1)
-Title.Font = Enum.Font.GothamBold
-Title.TextSize = 22
-Title.Parent = MainFrame
-
-local function createBtn(text, yPos, key, icon)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0.92,0,0,50)
-    btn.Position = UDim2.new(0.04,0,0,yPos)
-    btn.BackgroundColor3 = features[key] and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(45,45,55)
-    btn.Text = "   "..icon.."  "..text..": " .. (features[key] and "ON" or "OFF")
-    btn.TextColor3 = Color3.new(1,1,1)
-    btn.Font = Enum.Font.GothamSemibold
-    btn.TextSize = 17
-    btn.TextXAlignment = Enum.TextXAlignment.Left
-    btn.Parent = MainFrame
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0,10)
-
-    btn.MouseButton1Click:Connect(function()
-        features[key] = not features[key]
-        if features[key] then
-            btn.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
-            btn.Text = "   "..icon.."  "..text..": ON"
+    hitBtn.MouseButton1Click:Connect(function()
+        if State.Whirl then
+            stopWhirl()
         else
-            btn.BackgroundColor3 = Color3.fromRGB(45,45,55)
-            btn.Text = "   "..icon.."  "..text..": OFF"
+            startWhirl()
+        end
+        refreshWhirlBtn()
+        tween(iconCircle, {BackgroundColor3 = Color3.fromRGB(255,160,220)}, 0.08)
+        task.delay(0.14, function()
+            tween(iconCircle, {BackgroundColor3 = PAL.whirl}, 0.14)
+        end)
+    end)
+
+    hitBtn.MouseEnter:Connect(function()
+        tween(card, {BackgroundColor3 = Color3.fromRGB(55,30,60)}, 0.12)
+    end)
+    hitBtn.MouseLeave:Connect(function()
+        tween(card, {BackgroundColor3 = PAL.panel}, 0.12)
+    end)
+
+    -- keep button state in sync when whirl stops externally
+    RunService.Heartbeat:Connect(function()
+        if not State.Whirl and actionTxt.Text == "STOP" then
+            refreshWhirlBtn()
         end
     end)
 end
 
-createBtn("VOID SPAM", 65, "VoidSpam", "â˜ ï¸")
-createBtn("SLING BYPASS", 125, "SlingBypass", "ðŸŸ¢")
-createBtn("DAGGER BYPASS", 185, "DaggerBypass", "ðŸ—¡ï¸")
-createBtn("ANTI CLOSE", 245, "AntiClose", "ðŸš¶")
+-- ── separator label ──────────────────────────────────────────
 
-print("âœ… STRONG SLING + VOID VERSION LOADED")
+local function makeSep(text, order)
+    local f = Instance.new("Frame")
+    f.LayoutOrder       = order
+    f.Size              = UDim2.new(1,0,0,24)
+    f.BackgroundTransparency = 1
+    f.Parent            = Scroll
+    local l = label(f, "  " .. text, 11, PAL.subtext, Enum.Font.GothamSemibold)
+    l.Size              = UDim2.fromScale(1,1)
+    l.TextXAlignment    = Enum.TextXAlignment.Left
+    -- line
+    local line = Instance.new("Frame")
+    line.Size           = UDim2.new(1,-120,0,1)
+    line.Position       = UDim2.new(0,110,0.5,0)
+    line.BackgroundColor3 = PAL.accent
+    line.BackgroundTransparency = 0.7
+    line.BorderSizePixel = 0
+    line.Parent         = f
+end
+
+-- ── build all cards ──────────────────────────────────────────
+
+makeSep("COMBAT",  0)
+
+makeToggle({
+    icon     = "☠",
+    title    = "VOID SPAM",
+    sub      = "Teleports enemies + projectiles every frame",
+    stateKey = "VoidSpam",
+    order    = 1,
+})
+
+makeToggle({
+    icon     = "🟢",
+    title    = "SLING BYPASS",
+    sub      = "Namecall hook — allows your shots, blocks AC",
+    stateKey = "SlingBypass",
+    order    = 2,
+    onToggle = function()
+        if not State.bypassHooked then applyMetatableBypass() end
+    end,
+})
+
+makeToggle({
+    icon     = "🗡",
+    title    = "DAGGER BYPASS",
+    sub      = "Filters dagger / knife / blade remotes",
+    stateKey = "DaggerBypass",
+    order    = 3,
+    onToggle = function()
+        if not State.bypassHooked then applyMetatableBypass() end
+    end,
+})
+
+makeSep("MOVEMENT", 4)
+
+makeToggle({
+    icon     = "🚶",
+    title    = "ANTI CLOSE",
+    sub      = "Pushes you away from enemies within 20 studs",
+    stateKey = "AntiClose",
+    order    = 5,
+})
+
+makeWhirlButton()
+
+-- ── footer ───────────────────────────────────────────────────
+
+local Footer = Instance.new("Frame")
+Footer.Size             = UDim2.new(1,0,0,24)
+Footer.BackgroundTransparency = 1
+Footer.Parent           = Main
+
+-- pin to bottom
+Footer.Position = UDim2.new(0, 0, 1, -26)
+
+local footerLbl = label(Footer, "  void god  ·  yux  ·  X = stop whirl", 11, PAL.subtext, Enum.Font.Gotham)
+footerLbl.Size          = UDim2.fromScale(1,1)
+footerLbl.TextXAlignment = Enum.TextXAlignment.Center
+
+-- ── intro animation ──────────────────────────────────────────
+Main.Size     = UDim2.fromOffset(WIN_W, 0)
+Main.Position = UDim2.new(0.5, -WIN_W/2, 0.5, 0)
+tween(Main, {
+    Size     = UDim2.fromOffset(WIN_W, WIN_H),
+    Position = UDim2.new(0.5, -WIN_W/2, 0.5, -WIN_H/2),
+}, 0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+
+-- ────────────────────────────────────────────────────────────
+--  DONE
+-- ────────────────────────────────────────────────────────────
+print("[voidgod] v3.0.0 — loaded for " .. LP.Name)
