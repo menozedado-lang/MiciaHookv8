@@ -1,1655 +1,220 @@
--- ═══════════════════════════════════════════
--- YUX/OVERKILL PAID BYPASS
--- Obsidian UI with safe loader + fallback
--- ═══════════════════════════════════════════
+--// Services
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
 
--- ── Safe library loader with retry ──
-local function safeLoad(url, name)
-    local attempts = 0
-    local maxAttempts = 3
-    while attempts < maxAttempts do
-        attempts = attempts + 1
-        local ok, result = pcall(function()
-            return loadstring(game:HttpGet(url, true))()
-        end)
-        if ok and result then
-            return result
-        end
-        warn("[yux/overkill] Failed to load " .. name .. " (attempt " .. attempts .. "): " .. tostring(result))
-        task.wait(1)
-    end
-    return nil
-end
+local VoidCFrame = CFrame.new(9000, 9000, 9000)
+local trackedParts = {}
+local playerName = LocalPlayer.Name:lower()
 
-local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
-
-local Library      = safeLoad(repo .. "Library.lua",             "Library")
-local ThemeManager = safeLoad(repo .. "addons/ThemeManager.lua", "ThemeManager")
-local SaveManager  = safeLoad(repo .. "addons/SaveManager.lua",  "SaveManager")
-
--- ── Fallback headless mode ──
-if not Library then
-    warn("[yux/overkill] UI failed to load. Running bypass headlessly.")
-
-    local RunService = game:GetService("RunService")
-    local Players    = game:GetService("Players")
-    local LP         = Players.LocalPlayer
-    local Void       = CFrame.new(9000, 9000, 9000)
-    local tracked    = {}
-
-    local function chatNotify(msg)
-        pcall(function()
-            game:GetService("StarterGui"):SetCore("ChatMakeSystemMessage", {
-                Text     = "[yux/overkill] " .. msg,
-                Color    = Color3.fromRGB(255, 100, 100),
-                FontSize = Enum.FontSize.Size18,
-            })
-        end)
-    end
-
-    chatNotify("UI failed to load — bypass running headlessly")
-    chatNotify("Check your internet connection and re-inject")
-
-    workspace.ChildAdded:Connect(function(o)
-        if not o:IsA("BasePart") then return end
-        if o.Name == "CoreProjectile" then tracked[o] = true end
-    end)
-    workspace.ChildRemoved:Connect(function(o) tracked[o] = nil end)
-
-    RunService.Heartbeat:Connect(function()
-        pcall(function()
-            for _, p in pairs(Players:GetPlayers()) do
-                if p ~= LP and p.Character then
-                    local h = p.Character:FindFirstChild("HumanoidRootPart")
-                    if h then
-                        h.CFrame = Void
-                        h.AssemblyLinearVelocity  = Vector3.zero
-                        h.AssemblyAngularVelocity = Vector3.zero
-                    end
-                end
-            end
-            for o in pairs(tracked) do
-                if o and o.Parent then
-                    o.CFrame = Void
-                    o.AssemblyLinearVelocity = Vector3.zero
-                else
-                    tracked[o] = nil
-                end
-            end
-        end)
-    end)
-    return
-end
-
--- ── Library loaded successfully ──
-local Options = Library.Options
-local Toggles = Library.Toggles
-
-Library.ShowToggleFrameInKeybinds = true
-
--- ═══════════════════════════════════════════
--- SERVICES
--- ═══════════════════════════════════════════
-local RunService        = game:GetService("RunService")
-local Players           = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local HttpService       = game:GetService("HttpService")
-local LP                = Players.LocalPlayer
-local Void              = CFrame.new(9000, 9000, 9000)
-
--- ═══════════════════════════════════════════
--- PERFORMANCE CONSTANTS
--- ═══════════════════════════════════════════
-local PRED_UPDATE_RATE   = 2
-local AVATAR_UPDATE_RATE = 6
-local NEAREST_CACHE_TIME = 0.12
-local FRAME_RESET_AT     = 2^20
-
--- ═══════════════════════════════════════════
--- MASTER CONFIG
--- ═══════════════════════════════════════════
-local Config = {
-    -- Bypass
-    BypassEnabled   = false,
-    TeleportEnemies = true,
-    VoidPos         = Vector3.new(9000, 9000, 9000),
-
-    -- Projectile tab
-    ProjectileEnabled  = false,
-    ProjectileVoidPos  = Vector3.new(9000, 9000, 9000),
-
-    -- Prediction (sends LOCAL player to void)
-    PredictionEnabled      = false,
-    PredictionMethod       = "Velocity + Accel",
-    PredictionStrength     = 0.09,
-    PredictionLatency      = 0.055,
-    PredictionMaxLead      = 6,
-    PredictionSmoothFactor = 0.45,
-    PredictionAdaptive     = true,
-
-    -- Hit Reg
-    HitRegEnabled  = false,
-    HitRegStrength = 79,
-    FreezeEnemies  = true,
-    VoidHitProj    = true,
-    ShowDebug      = false,
-    HRSpeedThresh  = 50,
-
-    -- Weapon speed bypasses
-    SlingshotEnabled = false,
-    SlingshotSpeed   = 300,
-    BowEnabled       = false,
-    DaggersEnabled   = false,
-    GunbladeEnabled  = false,
-    WeaponSpeed      = 300,
-
-    -- Anti Riot
-    AntiRiotEnabled = false,
-
-    -- Void Jitter
-    VoidJitterEnabled   = false,
-    VoidJitterIntensity = 5,
-    VoidJitterRate      = 2,
-
-    -- Orbit
-    OrbitEnabled        = false,
-    OrbitAura           = true,
-    OrbitResolver       = true,
-    OrbitAntiRiot       = true,
-    OrbitAntiProjectile = true,
-    OrbitStrikeOnMelee  = true,
-    OrbitTPDelay        = 1.3,
-    OrbitShotInterval   = 0.4,
-    OrbitRadius         = 8,
-    OrbitSpeed          = 50,
-    OrbitSmartMode      = true,
-
-    -- Void Spam
-    VoidSpamEnabled  = false,
-    VoidSpamPriority = "Closest",
-    VoidSpamHide     = 0.25,
-    VoidSpamAttack   = 0.1,
-    VoidSpamShots    = 1,
-    VoidSpamVoidY    = -500,
-    VoidSpamRunning  = false,
-
-    -- Avatar
-    AvatarVictimId  = 0,
-    AvatarHelper    = "",
-    AvatarLevel     = 1,
-    AvatarStreak    = 0,
-    AvatarElo       = 0,
-    AvatarKeys      = 0,
-    AvatarPremium   = false,
-    AvatarVerified  = false,
-    AvatarUnlockAll = false,
-    AvatarPlatform  = "DESKTOP",
-
-    -- Target
-    TargetMode   = "All Enemies",
-    TargetPlayer = "",
+local features = {
+    VoidSpam = true,
+    SlingBypass = true,
+    DaggerBypass = true,
+    AntiClose = true
 }
 
--- ═══════════════════════════════════════════
--- FRAME COUNTERS
--- ═══════════════════════════════════════════
-local frameCount       = 0
-local avatarFrameCount = 0
-local jitterFrameCount = 0
-
--- ═══════════════════════════════════════════
--- PLAYER CACHE
--- ═══════════════════════════════════════════
-local playerCache = {}
-local function rebuildCache()
-    playerCache = {}
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LP then table.insert(playerCache, p) end
-    end
-end
-rebuildCache()
-Players.PlayerAdded:Connect(function()    rebuildCache() end)
-Players.PlayerRemoving:Connect(function() task.defer(rebuildCache) end)
-
-local nearestEnemyCache     = nil
-local nearestEnemyCacheTime = 0
-local targetPlayerObj       = nil
-
-local function getNearestEnemy()
-    local now = tick()
-    if now - nearestEnemyCacheTime < NEAREST_CACHE_TIME then return nearestEnemyCache end
-    local myChar = LP.Character
-    local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    if not myHRP then
-        nearestEnemyCache     = nil
-        nearestEnemyCacheTime = now
-        return nil
-    end
-    local myPos         = myHRP.Position
-    local nearest, dSqB = nil, math.huge
-    for _, p in ipairs(playerCache) do
-        local hrp = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-        if hrp then
-            local dx  = hrp.Position.X - myPos.X
-            local dy  = hrp.Position.Y - myPos.Y
-            local dz  = hrp.Position.Z - myPos.Z
-            local dSq = dx*dx + dy*dy + dz*dz
-            if dSq < dSqB then dSqB = dSq nearest = p end
-        end
-    end
-    nearestEnemyCache     = nearest
-    nearestEnemyCacheTime = now
-    return nearest
-end
-
-local function getPriorityTarget()
-    if #playerCache == 0 then return nil end
-    if Config.VoidSpamPriority == "Closest" then
-        return getNearestEnemy()
-    elseif Config.VoidSpamPriority == "LowHP" then
-        local best, bestHP = nil, math.huge
-        for _, p in ipairs(playerCache) do
-            local hum = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health < bestHP then bestHP = hum.Health best = p end
-        end
-        return best
-    elseif Config.VoidSpamPriority == "HighHP" then
-        local best, bestHP = nil, -math.huge
-        for _, p in ipairs(playerCache) do
-            local hum = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health > bestHP then bestHP = hum.Health best = p end
-        end
-        return best
-    end
-    return getNearestEnemy()
-end
-
-local function shouldTargetPlayer(p)
-    if p == LP then return false end
-    if Config.TargetMode == "Specific Player" then
-        return targetPlayerObj ~= nil and p == targetPlayerObj
-    end
-    return true
-end
-
-local function getPlayerWeapon(p)
-    local chr = p and p.Character
-    if not chr then return "Unknown" end
-    for _, obj in ipairs(chr:GetChildren()) do
-        if obj:IsA("Tool") then return obj.Name end
-    end
-    return "Unknown"
-end
-
--- ═══════════════════════════════════════════
--- RAYCAST PARAMS
--- ═══════════════════════════════════════════
-local rParams = RaycastParams.new()
-rParams.FilterType = Enum.RaycastFilterType.Exclude
-
-local function updateFilter()
-    if LP.Character then
-        rParams.FilterDescendantsInstances = {LP.Character}
-    end
-end
-updateFilter()
-LP.CharacterAdded:Connect(updateFilter)
-
--- ═══════════════════════════════════════════
--- PREDICTION CACHE (used by bypass to lead void)
--- ═══════════════════════════════════════════
-local predCache    = {}
-local HISTORY_SIZE = 5
-
-local function initPredCache(p)
-    predCache[p] = {
-        pos     = Vector3.zero,
-        vel     = Vector3.zero,
-        accel   = Vector3.zero,
-        smoothed = nil,
-        history  = {},
-    }
-end
-
-local function updatePredCacheForPlayer(p, hrp)
-    local now = tick()
-    local pos = hrp.Position
-    if not predCache[p] then initPredCache(p) end
-    local c = predCache[p]
-    local h = c.history
-    h[#h+1] = {pos=pos, t=now}
-    if #h > HISTORY_SIZE then table.remove(h, 1) end
-    if #h >= 2 then
-        local dt = h[#h].t - h[1].t
-        if dt > 0 then
-            c.vel = (h[#h].pos - h[1].pos) / dt * 0.65
-                  + hrp.AssemblyLinearVelocity * 0.35
-        end
-    else
-        c.vel = hrp.AssemblyLinearVelocity
-    end
-    if #h >= 3 then
-        local n   = #h
-        local dt1 = h[n].t   - h[n-1].t
-        local dt2 = h[n-1].t - h[n-2].t
-        if dt1 > 0 and dt2 > 0 then
-            c.accel = ((h[n].pos - h[n-1].pos)/dt1
-                    -  (h[n-1].pos - h[n-2].pos)/dt2)
-                    / ((dt1 + dt2) * 0.5)
-        end
-    end
-    c.pos = pos
-end
-
--- ═══════════════════════════════════════════
--- PREDICTION: LOCAL PLAYER GOES TO VOID
--- Sends LP's HumanoidRootPart to the void
--- based on predicted enemy positions so LP
--- appears to be at the enemy location
--- ═══════════════════════════════════════════
-local predVoidConn = nil
-
-local function stopPredVoid()
-    if predVoidConn then predVoidConn:Disconnect() predVoidConn = nil end
-end
-
-local function startPredVoid()
-    stopPredVoid()
-    predVoidConn = RunService.Heartbeat:Connect(function()
-        pcall(function()
-            local myChar = LP.Character
-            local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
-            if not myHRP then return end
-
-            -- Update prediction cache for all enemies
-            for _, p in ipairs(playerCache) do
-                local hrp = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-                if hrp then updatePredCacheForPlayer(p, hrp) end
-            end
-
-            -- Get nearest enemy prediction
-            local target = getNearestEnemy()
-            if not target then
-                -- No target: send LP to void
-                myHRP.CFrame = CFrame.new(Config.VoidPos)
-                myHRP.AssemblyLinearVelocity  = Vector3.zero
-                myHRP.AssemblyAngularVelocity = Vector3.zero
-                return
-            end
-
-            local c = predCache[target]
-            if not c then
-                myHRP.CFrame = CFrame.new(Config.VoidPos)
-                myHRP.AssemblyLinearVelocity  = Vector3.zero
-                myHRP.AssemblyAngularVelocity = Vector3.zero
-                return
-            end
-
-            -- Calculate lead time
-            local tl = Config.PredictionStrength + Config.PredictionLatency
-            if Config.PredictionAdaptive then
-                local sc = math.clamp(1 - c.vel.Magnitude / 200, 0.4, 1.4)
-                tl = tl * sc
-            end
-
-            -- Calculate predicted position
-            local pred
-            if Config.PredictionMethod == "Velocity Only" then
-                pred = c.pos + c.vel * tl
-            elseif Config.PredictionMethod == "Velocity + Accel" then
-                pred = c.pos + c.vel * tl + c.accel * (0.5 * tl * tl)
-            else
-                pred = c.pos + c.vel * tl + c.accel * 0.5 * (0.5 * tl * tl)
-            end
-
-            -- Clamp max lead
-            local delta = pred - c.pos
-            local mag   = delta.Magnitude
-            if mag > Config.PredictionMaxLead then
-                pred = c.pos + delta * (Config.PredictionMaxLead / mag)
-            end
-
-            -- Smooth
-            local sf = Config.PredictionSmoothFactor
-            if sf > 0 then
-                c.smoothed = c.smoothed and c.smoothed * sf + pred * (1 - sf) or pred
-                pred = c.smoothed
-            end
-
-            -- Send LOCAL PLAYER to void at the predicted enemy X/Z
-            -- Y stays at void height so LP is invisible/underground
-            local vy = Config.VoidPos.Y
-            myHRP.CFrame = CFrame.new(pred.X, vy, pred.Z)
-            myHRP.AssemblyLinearVelocity  = Vector3.zero
-            myHRP.AssemblyAngularVelocity = Vector3.zero
-        end)
-    end)
-end
-
--- ═══════════════════════════════════════════
--- PROJECTILE TAB LOGIC
--- Only tracks "CoreProjectile" by name
--- Actually teleports the part to void (real CFrame move)
--- ═══════════════════════════════════════════
-local projTracked  = {}
-local projChildAdd = nil
-local projChildRem = nil
-local projDescAdd  = nil
-local projHB       = nil
-
-local function projTrack(obj)
-    if not obj:IsA("BasePart") then return end
-    if obj.Name ~= "CoreProjectile" then return end
-    projTracked[obj] = true
-end
-
-local function stopProjectile()
-    if projHB       then projHB:Disconnect()       projHB       = nil end
-    if projChildAdd then projChildAdd:Disconnect()  projChildAdd = nil end
-    if projChildRem then projChildRem:Disconnect()  projChildRem = nil end
-    if projDescAdd  then projDescAdd:Disconnect()   projDescAdd  = nil end
-    projTracked = {}
-end
-
-local function startProjectile()
-    stopProjectile()
-
-    -- Watch workspace top-level children
-    projChildAdd = workspace.ChildAdded:Connect(function(o)
-        if o.Name == "CoreProjectile" and o:IsA("BasePart") then
-            projTrack(o)
-        end
-    end)
-
-    -- Watch all descendants (in case it parents inside a model)
-    projDescAdd = workspace.DescendantAdded:Connect(function(o)
-        if o.Name == "CoreProjectile" and o:IsA("BasePart") then
-            projTrack(o)
-        end
-    end)
-
-    projChildRem = workspace.ChildRemoved:Connect(function(o)
-        projTracked[o] = nil
-    end)
-
-    -- Scan existing workspace for any already-existing CoreProjectile
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj.Name == "CoreProjectile" and obj:IsA("BasePart") then
-            projTracked[obj] = true
-        end
-    end
-
-    local vcf = CFrame.new(Config.ProjectileVoidPos)
-
-    projHB = RunService.Heartbeat:Connect(function()
-        pcall(function()
-            -- Update void CFrame in case slider changed
-            vcf = CFrame.new(Config.ProjectileVoidPos)
-            for part in pairs(projTracked) do
-                if part and part.Parent then
-                    -- Actual teleport: set real CFrame position
-                    part.CFrame = vcf
-                    part.AssemblyLinearVelocity  = Vector3.zero
-                    part.AssemblyAngularVelocity = Vector3.zero
-                else
-                    projTracked[part] = nil
-                end
+--// Your Strong Projectile Tracking
+workspace.ChildAdded:Connect(function(obj)
+    if not obj:IsA("BasePart") and not obj:IsA("MeshPart") then return end
+    if obj.Name == "CoreProjectile" then
+        trackedParts[obj] = true
+    elseif obj.Name == "Part" then
+        task.defer(function()
+            if obj and obj.Parent and obj.AssemblyLinearVelocity.Magnitude > 40 then
+                trackedParts[obj] = true
             end
         end)
-    end)
-end
-
--- ═══════════════════════════════════════════
--- BYPASS (enemy teleport only, no projectile logic)
--- ═══════════════════════════════════════════
-local bypHB       = nil
-local bypChildAdd = nil
-local bypChildRem = nil
-
-local function stopBypass()
-    if bypHB       then bypHB:Disconnect()       bypHB       = nil end
-    if bypChildAdd then bypChildAdd:Disconnect()  bypChildAdd = nil end
-    if bypChildRem then bypChildRem:Disconnect()  bypChildRem = nil end
-    predCache             = {}
-    nearestEnemyCache     = nil
-    nearestEnemyCacheTime = 0
-end
-
-local function startBypass()
-    stopBypass()
-
-    bypHB = RunService.Heartbeat:Connect(function()
-        pcall(function()
-            frameCount = frameCount + 1
-            if frameCount >= FRAME_RESET_AT then frameCount = 0 end
-
-            local nearestOnly = Config.TargetMode == "Nearest Enemy" and getNearestEnemy() or nil
-
-            if Config.TeleportEnemies then
-                local vx = Config.VoidPos.X
-                local vy = Config.VoidPos.Y
-                local vz = Config.VoidPos.Z
-                for _, p in ipairs(playerCache) do
-                    if not shouldTargetPlayer(p) then continue end
-                    local skip = false
-                    if Config.TargetMode == "Nearest Enemy" then
-                        skip = p ~= nearestOnly
-                    elseif Config.TargetMode == "Specific Player" then
-                        skip = p ~= targetPlayerObj
-                    end
-                    if not skip and p.Character then
-                        local h = p.Character:FindFirstChild("HumanoidRootPart")
-                        if h then
-                            h.CFrame = CFrame.new(vx, vy, vz)
-                            h.AssemblyLinearVelocity  = Vector3.zero
-                            h.AssemblyAngularVelocity = Vector3.zero
-                        end
-                    end
-                end
-            end
-        end)
-    end)
-end
-
--- ═══════════════════════════════════════════
--- HIT REG
--- ═══════════════════════════════════════════
-local tracked    = {}
-local hitTotal   = 0
-local shotTotal  = 0
-local hitRegConn = nil
-local hrChildAdd = nil
-local hrChildRem = nil
-
-local function multiRaycast(origin, direction, strength)
-    local ext     = 1 + (strength/100) * 4
-    local mainDir = direction * ext
-    local hit     = workspace:Raycast(origin, mainDir, rParams)
-    if hit then return hit end
-    local spread = (strength/100) * 0.6
-    local perp1  = Vector3.new(-direction.Z, 0,  direction.X).Unit * spread
-    local perp2  = Vector3.new( direction.Z, 0, -direction.X).Unit * spread
-    local up     = Vector3.new(0, spread, 0)
-    for _, off in ipairs({perp1, perp2, up, -up}) do
-        local h = workspace:Raycast(origin + off, mainDir, rParams)
-        if h then return h end
     end
-    return workspace:Raycast(origin, mainDir * 2, rParams)
-end
-
-local function shouldFire()
-    if Config.HitRegStrength >= 100 then return true  end
-    if Config.HitRegStrength <= 0   then return false end
-    return math.random(1, 100) <= Config.HitRegStrength
-end
-
-local function trackHR(obj)
-    if not obj:IsA("BasePart") then return end
-    tracked[obj] = {lastPos=obj.Position, lastPos2=obj.Position}
-    shotTotal    = shotTotal + 1
-end
-
-local function stopHitReg()
-    if hitRegConn then hitRegConn:Disconnect() hitRegConn = nil end
-    if hrChildAdd then hrChildAdd:Disconnect() hrChildAdd = nil end
-    if hrChildRem then hrChildRem:Disconnect() hrChildRem = nil end
-    tracked = {}
-end
-
-local function startHitReg()
-    stopHitReg()
-    -- Only track CoreProjectile for hit reg too
-    hrChildAdd = workspace.ChildAdded:Connect(function(o)
-        if o.Name == "CoreProjectile" and o:IsA("BasePart") then
-            trackHR(o)
-        end
-    end)
-    hrChildRem = workspace.ChildRemoved:Connect(function(o) tracked[o] = nil end)
-
-    hitRegConn = RunService.Heartbeat:Connect(function()
-        if Config.FreezeEnemies then
-            for _, p in ipairs(playerCache) do
-                local hrp = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-                if hrp then
-                    hrp.CFrame = Void
-                    hrp.AssemblyLinearVelocity  = Vector3.zero
-                    hrp.AssemblyAngularVelocity = Vector3.zero
-                end
-            end
-        end
-        for obj, data in pairs(tracked) do
-            if obj and obj.Parent then
-                local cur = obj.Position
-                local dir = cur - data.lastPos
-                if dir.Magnitude > 0.01 and shouldFire() then
-                    local hit = multiRaycast(data.lastPos, dir, Config.HitRegStrength)
-                    if hit and Config.ShowDebug then
-                        hitTotal = hitTotal + 1
-                        print(string.format("[HitReg] Hit: %s | %d/%d (%.0f%%)",
-                            hit.Instance.Name, hitTotal, shotTotal,
-                            shotTotal > 0 and hitTotal/shotTotal*100 or 0))
-                    end
-                end
-                data.lastPos2 = data.lastPos
-                data.lastPos  = cur
-                if Config.VoidHitProj then
-                    obj.CFrame = Void
-                    obj.AssemblyLinearVelocity = Vector3.zero
-                end
-            else
-                tracked[obj] = nil
-            end
-        end
-    end)
-end
-
--- ═══════════════════════════════════════════
--- WEAPONS (speed bypass)
--- ═══════════════════════════════════════════
-local WeaponDefaults = {
-    Slingshot = {ReloadLength=0},
-    Bow       = {ReloadLength=0},
-    Daggers   = {ReloadLength=0.09},
-    Gunblade  = {ReloadLength=0},
-}
-
-local function getItems()
-    local ok, IL = pcall(function()
-        return require(ReplicatedStorage.Modules.ItemLibrary)
-    end)
-    if not ok then return nil end
-    return rawget(IL, "Items")
-end
-
-local function applyWeaponBypass(name, enabled, speed)
-    local Items = getItems()
-    if not Items then return end
-    for _, Item in Items do
-        if Item.Name == name then
-            if Item["ReloadLength"] == nil then continue end
-            if enabled then
-                local base = WeaponDefaults[name] and WeaponDefaults[name].ReloadLength or 0
-                local mult = (300 - speed) / 200
-                local nv   = math.clamp(base * mult, 0, base * 3)
-                if speed >= 300 then nv = (name == "Daggers") and 0.001 or 0 end
-                rawset(Item, "ReloadLength", nv)
-            else
-                rawset(Item, "ReloadLength",
-                    WeaponDefaults[name] and WeaponDefaults[name].ReloadLength or 0)
-            end
-        end
-    end
-end
-
-local function applyAllWeapons()
-    if Config.SlingshotEnabled then applyWeaponBypass("Slingshot", true, Config.SlingshotSpeed) end
-    if Config.BowEnabled       then applyWeaponBypass("Bow",       true, Config.WeaponSpeed)    end
-    if Config.DaggersEnabled   then applyWeaponBypass("Daggers",   true, Config.WeaponSpeed)    end
-    if Config.GunbladeEnabled  then applyWeaponBypass("Gunblade",  true, Config.WeaponSpeed)    end
-end
-
-local function resetAllWeapons()
-    for name in pairs(WeaponDefaults) do applyWeaponBypass(name, false, 100) end
-end
-
--- ═══════════════════════════════════════════
--- ANTI RIOT
--- ═══════════════════════════════════════════
-local antiRiotConn = nil
-
-local function stopAntiRiot()
-    if antiRiotConn then antiRiotConn:Disconnect() antiRiotConn = nil end
-end
-
-local function startAntiRiot()
-    stopAntiRiot()
-    antiRiotConn = RunService.Heartbeat:Connect(function()
-        for _, p in ipairs(playerCache) do
-            local chr = p.Character
-            if not chr then continue end
-            local hasRiot = false
-            for _, obj in ipairs(chr:GetChildren()) do
-                if obj:IsA("Tool") and
-                   (obj.Name:lower():find("riot") or obj.Name:lower():find("shield")) then
-                    hasRiot = true break
-                end
-            end
-            if not hasRiot then
-                local bp = p:FindFirstChild("Backpack")
-                if bp then
-                    for _, obj in ipairs(bp:GetChildren()) do
-                        if obj:IsA("Tool") and
-                           (obj.Name:lower():find("riot") or obj.Name:lower():find("shield")) then
-                            hasRiot = true break
-                        end
-                    end
-                end
-            end
-            if hasRiot then
-                local hrp = chr:FindFirstChild("HumanoidRootPart")
-                if hrp then
-                    hrp.CFrame = Void
-                    hrp.AssemblyLinearVelocity  = Vector3.zero
-                    hrp.AssemblyAngularVelocity = Vector3.zero
-                end
-            end
-        end
-    end)
-end
-
--- ═══════════════════════════════════════════
--- VOID JITTER
--- ═══════════════════════════════════════════
-local jitterConn = nil
-
-local function stopVoidJitter()
-    if jitterConn then jitterConn:Disconnect() jitterConn = nil end
-end
-
-local function startVoidJitter()
-    stopVoidJitter()
-    jitterConn = RunService.Heartbeat:Connect(function()
-        jitterFrameCount = jitterFrameCount + 1
-        if jitterFrameCount >= FRAME_RESET_AT then jitterFrameCount = 0 end
-        if jitterFrameCount % Config.VoidJitterRate ~= 0 then return end
-        local i  = Config.VoidJitterIntensity
-        local jv = CFrame.new(
-            9000 + math.random(-i*10, i*10)/10,
-            9000 + math.random(-i*10, i*10)/10,
-            9000 + math.random(-i*10, i*10)/10
-        )
-        for _, p in ipairs(playerCache) do
-            local hrp = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                hrp.CFrame = jv
-                hrp.AssemblyLinearVelocity  = Vector3.zero
-                hrp.AssemblyAngularVelocity = Vector3.zero
-            end
-        end
-    end)
-end
-
--- ═══════════════════════════════════════════
--- ORBIT RAGEBOT
--- Aura orbits around target HEAD (not HRP)
--- ═══════════════════════════════════════════
-local orbitConn     = nil
-local orbitLastShot = 0
-local orbitLastTP   = 0
-local orbitAngle    = 0
-
-local function getSmartOrbitParams(target)
-    if not Config.OrbitSmartMode then return Config.OrbitSpeed, Config.OrbitRadius end
-    local weapon = getPlayerWeapon(target):lower()
-    if     weapon:find("sniper")  then return 80,  12
-    elseif weapon:find("shotgun") then return 120, 15
-    elseif weapon:find("melee")
-        or weapon:find("sword")
-        or weapon:find("dagger")
-        or weapon:find("knife")   then return 60,  6
-    elseif weapon:find("sling")   then return 90,  10
-    elseif weapon:find("bow")     then return 70,  11
-    else return Config.OrbitSpeed, Config.OrbitRadius
-    end
-end
-
-local function hasRiotShield(p)
-    local chr = p and p.Character
-    if not chr then return false end
-    for _, obj in ipairs(chr:GetChildren()) do
-        if obj:IsA("Tool") and
-           (obj.Name:lower():find("riot") or obj.Name:lower():find("shield")) then
-            return true
-        end
-    end
-    return false
-end
-
-local function detectIncomingProjectile()
-    local myChar = LP.Character
-    local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    if not myHRP then return false end
-    for _, obj in ipairs(workspace:GetChildren()) do
-        if obj:IsA("BasePart") and obj.Name == "CoreProjectile" then
-            local vel = obj.AssemblyLinearVelocity
-            if vel.Magnitude > 50 then
-                local toMe = myHRP.Position - obj.Position
-                if toMe.Unit:Dot(vel.Unit) > 0.7 and toMe.Magnitude < 30 then
-                    return true
-                end
-            end
-        end
-    end
-    return false
-end
-
-local function stopOrbitRagebot()
-    if orbitConn then orbitConn:Disconnect() orbitConn = nil end
-end
-
-local function startOrbitRagebot()
-    stopOrbitRagebot()
-    orbitAngle = 0
-
-    orbitConn = RunService.Heartbeat:Connect(function(dt)
-        local myChar = LP.Character
-        local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
-        if not myHRP then return end
-
-        local target    = getNearestEnemy()
-        if not target   then return end
-        local targetChr = target.Character
-        if not targetChr then return end
-
-        local targetHRP  = targetChr:FindFirstChild("HumanoidRootPart")
-        if not targetHRP then return end
-
-        -- Use Head for aura orbit center if it exists, else fall back to HRP
-        local targetHead = targetChr:FindFirstChild("Head")
-        local auraCenter = targetHead and targetHead.Position or targetHRP.Position
-
-        if Config.OrbitAntiRiot and hasRiotShield(target) then
-            orbitAngle = orbitAngle + 180
-        end
-
-        local speed, radius = getSmartOrbitParams(target)
-
-        if Config.OrbitAntiProjectile and detectIncomingProjectile() then
-            orbitAngle = orbitAngle + 90
-        end
-
-        orbitAngle = (orbitAngle + speed * dt) % 360
-        local rad      = math.rad(orbitAngle)
-        -- Orbit horizontally around the head position
-        local orbitPos = auraCenter + Vector3.new(
-            math.cos(rad) * radius,
-            0,
-            math.sin(rad) * radius
-        )
-
-        local now = tick()
-        if now - orbitLastTP < Config.OrbitTPDelay then return end
-        orbitLastTP = now
-
-        if Config.OrbitResolver then
-            orbitAngle = orbitAngle + math.random(-15, 15)
-        end
-
-        myHRP.CFrame = CFrame.new(orbitPos)
-        myHRP.AssemblyLinearVelocity = Vector3.zero
-
-        -- Aura: orbit an additional part around the TARGET HEAD
-        if Config.OrbitAura then
-            -- Teleport target HRP to a position that circles the head Y level
-            local auraAngle = math.rad((orbitAngle + 180) % 360)
-            local auraPos   = auraCenter + Vector3.new(
-                math.cos(auraAngle) * (radius * 0.5),
-                0,
-                math.sin(auraAngle) * (radius * 0.5)
-            )
-            targetHRP.CFrame = CFrame.new(auraPos.X, auraCenter.Y, auraPos.Z)
-            targetHRP.AssemblyLinearVelocity  = Vector3.zero
-            targetHRP.AssemblyAngularVelocity = Vector3.zero
-        end
-
-        if Config.OrbitStrikeOnMelee then
-            local weapon = getPlayerWeapon(target):lower()
-            if (weapon:find("melee") or weapon:find("sword") or
-                weapon:find("dagger") or weapon:find("knife")) and
-               (myHRP.Position - targetHRP.Position).Magnitude < 10 then
-                myHRP.CFrame = CFrame.new(targetHRP.Position + Vector3.new(0, 0, 2))
-                task.wait(0.05)
-                pcall(function()
-                    local tool = myChar:FindFirstChildOfClass("Tool")
-                    if tool then
-                        local r = tool:FindFirstChild("RemoteEvent")
-                        if r then r:FireServer() end
-                    end
-                end)
-            end
-        end
-
-        if now - orbitLastShot >= Config.OrbitShotInterval then
-            orbitLastShot = now
-            pcall(function()
-                local tool = myChar:FindFirstChildOfClass("Tool")
-                if tool then
-                    local r = tool:FindFirstChild("RemoteEvent")
-                    if r then r:FireServer() end
-                end
-            end)
-        end
-    end)
-end
-
--- ═══════════════════════════════════════════
--- VOID SPAM RAGEBOT
--- ═══════════════════════════════════════════
-local voidSpamConn = nil
-
-local function stopVoidSpam()
-    if voidSpamConn then voidSpamConn:Disconnect() voidSpamConn = nil end
-    Config.VoidSpamRunning = false
-end
-
-local function voidSpamCycle(target)
-    if Config.VoidSpamRunning then return end
-    Config.VoidSpamRunning = true
-    local myChar = LP.Character
-    local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    if not myHRP then Config.VoidSpamRunning = false return end
-    local originalCF = myHRP.CFrame
-    local underVoid  = CFrame.new(0, Config.VoidSpamVoidY, 0)
-    myHRP.CFrame = underVoid
-    myHRP.AssemblyLinearVelocity = Vector3.zero
-    task.wait(Config.VoidSpamHide)
-    local targetChr = target and target.Character
-    local targetHRP = targetChr and targetChr:FindFirstChild("HumanoidRootPart")
-    if targetHRP then
-        myHRP.CFrame = CFrame.new(targetHRP.Position + Vector3.new(0, 3, 0))
-        myHRP.AssemblyLinearVelocity = Vector3.zero
-        for i = 1, Config.VoidSpamShots do
-            pcall(function()
-                local tool = myChar:FindFirstChildOfClass("Tool")
-                if tool then
-                    local r = tool:FindFirstChild("RemoteEvent")
-                    if r then r:FireServer() end
-                    local a = tool:FindFirstChild("Activate")
-                    if a and a:IsA("RemoteEvent") then a:FireServer() end
-                end
-            end)
-            if i < Config.VoidSpamShots then task.wait(0.05) end
-        end
-        task.wait(Config.VoidSpamAttack)
-    end
-    myHRP.CFrame = underVoid
-    myHRP.AssemblyLinearVelocity = Vector3.zero
-    task.wait(0.08)
-    myHRP.CFrame = originalCF
-    myHRP.AssemblyLinearVelocity = Vector3.zero
-    Config.VoidSpamRunning = false
-end
-
-local function startVoidSpam()
-    stopVoidSpam()
-    voidSpamConn = RunService.Heartbeat:Connect(function()
-        if Config.VoidSpamRunning then return end
-        local target = getPriorityTarget()
-        if not target then return end
-        task.spawn(function() voidSpamCycle(target) end)
-    end)
-end
-
--- ═══════════════════════════════════════════
--- AVATAR CHANGER
--- ═══════════════════════════════════════════
-local platformImages = {
-    DESKTOP = "rbxassetid://17136633356",
-    MOBILE  = "rbxassetid://17136633510",
-    CONSOLE = "rbxassetid://17136633629",
-    VR      = "rbxassetid://17136765745",
-}
-local avatarActive     = false
-local avatarRenderConn = nil
-local avatarOldNC      = nil
-local avatarData       = nil
-
-local function applyCharAppearance(plr, decoded)
-    pcall(function()
-        local app  = Players:GetCharacterAppearanceAsync(decoded.id)
-        local char = plr.Character
-        if not char then return end
-        for _, v in ipairs(char:GetChildren()) do
-            if v:IsA("Accessory") or v:IsA("Shirt") or
-               v:IsA("Pants") or v:IsA("BodyColors") then v:Destroy() end
-        end
-        for _, v in ipairs(app:GetChildren()) do
-            if v:IsA("Shirt") or v:IsA("Pants") or v:IsA("BodyColors") then
-                v.Parent = char
-            elseif v:IsA("Accessory") then
-                char:WaitForChild("Humanoid"):AddAccessory(v)
-            end
-        end
-        local head = char:WaitForChild("Head")
-        if head:FindFirstChild("face") then head.face:Destroy() end
-        if app:FindFirstChild("face") then
-            app.face.Parent = head
-        else
-            local f = Instance.new("Decal")
-            f.Face        = Enum.NormalId.Front
-            f.Name        = "face"
-            f.Texture     = "rbxasset://textures/face.png"
-            f.Transparency = 0
-            f.Parent      = head
-        end
-        local parent = char.Parent
-        char.Parent  = nil
-        char.Parent  = parent
-    end)
-end
-
-local function stopAvatar()
-    avatarActive = false
-    if avatarRenderConn then avatarRenderConn:Disconnect() avatarRenderConn = nil end
-    if avatarOldNC then
-        pcall(function() hookmetamethod(game, "__index", avatarOldNC) end)
-        avatarOldNC = nil
-    end
-    avatarData = nil
-end
-
-local function startAvatar()
-    if avatarActive then stopAvatar() end
-    if Config.AvatarVictimId == 0 then
-        Library:Notify("Enter a User ID first!", 4) return
-    end
-    local ok, err = pcall(function()
-        local raw  = game:HttpGet("https://users.roblox.com/v1/users/"..Config.AvatarVictimId, true)
-        avatarData = HttpService:JSONDecode(raw)
-    end)
-    if not ok or not avatarData or not avatarData.name then
-        Library:Notify("Fetch failed: "..tostring(err), 5) return
-    end
-    local decoded  = avatarData
-    local platform = tostring(Config.AvatarPlatform):upper()
-    local friend   = Config.AvatarHelper ~= "" and Players:FindFirstChild(Config.AvatarHelper) or LP
-    if not friend then Library:Notify("Helper not found", 4) return end
-    pcall(function()
-        friend.Name                  = decoded.name
-        friend.UserId                = decoded.id
-        friend.CharacterAppearanceId = decoded.id
-        friend.DisplayName           = decoded.displayName
-    end)
-    if not friend.Character then friend.CharacterAdded:Wait() end
-    local char = friend.Character
-    char:WaitForChild("Humanoid")
-    pcall(function()
-        char.Name                 = decoded.name
-        char.Humanoid.DisplayName = decoded.displayName
-    end)
-    pcall(function()
-        local po = Players:WaitForChild(decoded.name)
-        po:SetAttribute("Level", tonumber(Config.AvatarLevel))
-        po:SetAttribute("StatisticDuelsWinStreak", tonumber(Config.AvatarStreak))
-        local cl = po:WaitForChild("CustomLeaderstats")
-        if cl:FindFirstChild("Level")      then cl.Level.Value         = tonumber(Config.AvatarLevel)  end
-        if cl:FindFirstChild("Win Streak") then cl["Win Streak"].Value = tonumber(Config.AvatarStreak) end
-        if tonumber(Config.AvatarElo) > 0 then
-            po:SetAttribute("DisplayELO", tonumber(Config.AvatarElo))
-        end
-    end)
-    applyCharAppearance(friend, decoded)
-    friend.CharacterAdded:Connect(function()
-        if not avatarActive then return end
-        task.wait(0.5)
-        applyCharAppearance(friend, decoded)
-    end)
-    pcall(function()
-        local sp = Players:FindFirstChild(decoded.name) or friend
-        avatarOldNC = hookmetamethod(game, "__index", function(self, key)
-            if self == sp then
-                if key == "MembershipType" and Config.AvatarPremium then
-                    return Enum.MembershipType.Premium
-                end
-                if key == "HasVerifiedBadge" and Config.AvatarVerified then
-                    return true
-                end
-            end
-            return avatarOldNC(self, key)
-        end)
-    end)
-    local cachedCtrl, cachedCtrlTime = nil, 0
-    avatarRenderConn = RunService.RenderStepped:Connect(function()
-        avatarFrameCount = avatarFrameCount + 1
-        if avatarFrameCount >= FRAME_RESET_AT then avatarFrameCount = 0 end
-        if avatarFrameCount % AVATAR_UPDATE_RATE ~= 0 then return end
-        pcall(function()
-            local now = tick()
-            if not cachedCtrl or now - cachedCtrlTime > 2 then
-                local pi = Players:FindFirstChild(decoded.name)
-                cachedCtrl = pi and pi.Character
-                    and pi.Character:FindFirstChild("HumanoidRootPart")
-                    and pi.Character.HumanoidRootPart:FindFirstChild("Nametag")
-                    and pi.Character.HumanoidRootPart.Nametag:FindFirstChild("Frame")
-                    and pi.Character.HumanoidRootPart.Nametag.Frame:FindFirstChild("Player")
-                    and pi.Character.HumanoidRootPart.Nametag.Frame.Player:FindFirstChild("Controls")
-                cachedCtrlTime = now
-            end
-            if cachedCtrl then
-                cachedCtrl.Image = platformImages[platform] or platformImages.DESKTOP
-            end
-        end)
-    end)
-    avatarActive = true
-    Library:Notify("Avatar: Spoofing as "..decoded.name, 4)
-end
-
--- ═══════════════════════════════════════════
--- WINDOW
--- ═══════════════════════════════════════════
-local Window = Library:CreateWindow({
-    Title            = "yux/overkill",
-    Footer           = "paid bypass · all weapons",
-    Icon             = 95816097006870,
-    NotifySide       = "Right",
-    ShowCustomCursor = false,
-    AutoShow         = true,
-})
-
-local Tabs = {
-    Bypass     = Window:AddTab("Bypass",            "shield"),
-    Projectile = Window:AddTab("Projectile",        "zap"),
-    Prediction = Window:AddTab("Prediction",        "crosshair"),
-    HitWeapons = Window:AddTab("Hit Reg + Weapons", "target"),
-    AntiJitter = Window:AddTab("Anti + Jitter",     "shuffle"),
-    Orbit      = Window:AddTab("Orbit",             "circle"),
-    VoidSpam   = Window:AddTab("Void Spam",         "zap"),
-    Avatar     = Window:AddTab("Avatar",            "user"),
-    Settings   = Window:AddTab("Settings",          "settings"),
-}
-
--- ═══════════════════════════════════════════
--- TAB 1 ── BYPASS
--- ═══════════════════════════════════════════
-local BPL = Tabs.Bypass:AddLeftGroupbox("Bypass Control", "shield")
-local BPB = Tabs.Bypass:AddLeftGroupbox("Target",         "users")
-local BPV = Tabs.Bypass:AddRightGroupbox("Void Position", "map-pin")
-
-BPL:AddToggle("BypassEnabled", {
-    Text    = "Enable Bypass",
-    Default = false,
-    Tooltip = "Teleports enemies to void every frame",
-    Callback = function(v)
-        Config.BypassEnabled = v
-        if v then startBypass() else stopBypass() end
-        Library:Notify(v and "Bypass ON" or "Bypass OFF", 3)
-    end,
-})
-BPL:AddDivider()
-BPL:AddCheckbox("TeleportEnemies", {
-    Text     = "Void Enemies",
-    Default  = true,
-    Callback = function(v) Config.TeleportEnemies = v end,
-})
-
-BPV:AddSlider("VoidX", {Text="Void X",Default=9000,Min=1000,Max=50000,Rounding=0,Suffix=" studs",Callback=function(v) Config.VoidPos=Vector3.new(v,Config.VoidPos.Y,Config.VoidPos.Z) end})
-BPV:AddSlider("VoidY", {Text="Void Y",Default=9000,Min=1000,Max=50000,Rounding=0,Suffix=" studs",Callback=function(v) Config.VoidPos=Vector3.new(Config.VoidPos.X,v,Config.VoidPos.Z) end})
-BPV:AddSlider("VoidZ", {Text="Void Z",Default=9000,Min=1000,Max=50000,Rounding=0,Suffix=" studs",Callback=function(v) Config.VoidPos=Vector3.new(Config.VoidPos.X,Config.VoidPos.Y,v) end})
-
-BPB:AddDropdown("TargetMode", {
-    Values   = {"All Enemies","Nearest Enemy","Specific Player"},
-    Default  = "All Enemies",
-    Text     = "Target Mode",
-    Callback = function(v) Config.TargetMode = v nearestEnemyCache = nil end,
-})
-BPB:AddInput("TargetUser", {
-    Default     = "",
-    Text        = "Specific Username",
-    Placeholder = "Exact username...",
-    Finished    = true,
-    Callback    = function(v)
-        Config.TargetPlayer = v
-        targetPlayerObj     = nil
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p.Name:lower() == v:lower() or p.DisplayName:lower() == v:lower() then
-                targetPlayerObj = p
-                Library:Notify("Target: "..p.Name, 3)
-                return
-            end
-        end
-        if v ~= "" then Library:Notify("'"..v.."' not found", 3) end
-    end,
-})
-BPB:AddButton({Text="Select Nearest Enemy", Func=function()
-    nearestEnemyCacheTime = 0
-    local n = getNearestEnemy()
-    if n then
-        Config.TargetMode = "Specific Player"
-        targetPlayerObj   = n
-        Library:Notify("Targeting: "..n.Name, 3)
-    else
-        Library:Notify("No enemies found", 3)
-    end
-end})
-
--- ═══════════════════════════════════════════
--- TAB 2 ── PROJECTILE
--- Only CoreProjectile, real teleport to void
--- ═══════════════════════════════════════════
-local PJL = Tabs.Projectile:AddLeftGroupbox("Projectile Void",    "zap")
-local PJR = Tabs.Projectile:AddRightGroupbox("Void Destination",  "map-pin")
-
-PJL:AddToggle("ProjectileEnabled", {
-    Text    = "Enable Projectile Void",
-    Default = false,
-    Tooltip = "Teleports every CoreProjectile to void on Heartbeat",
-    Callback = function(v)
-        Config.ProjectileEnabled = v
-        if v then startProjectile() else stopProjectile() end
-        Library:Notify(v and "Projectile Void ON" or "Projectile Void OFF", 3)
-    end,
-})
-PJL:AddDivider()
-PJL:AddLabel("Tracked name: CoreProjectile only")
-PJL:AddLabel("Real CFrame teleport — no fake position")
-PJL:AddLabel("Zeroes velocity + angular velocity")
-PJL:AddDivider()
-PJL:AddButton({Text="Scan Workspace Now", Func=function()
-    local count = 0
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj.Name == "CoreProjectile" and obj:IsA("BasePart") then
-            projTracked[obj] = true
-            count = count + 1
-        end
-    end
-    Library:Notify("Scan complete: "..count.." CoreProjectile(s) found", 4)
-end})
-PJL:AddButton({Text="Clear Tracked Cache", Func=function()
-    projTracked = {}
-    Library:Notify("Projectile cache cleared", 3)
-end})
-
-PJR:AddSlider("ProjVoidX", {Text="Void X",Default=9000,Min=1000,Max=50000,Rounding=0,Suffix=" studs",Callback=function(v) Config.ProjectileVoidPos=Vector3.new(v,Config.ProjectileVoidPos.Y,Config.ProjectileVoidPos.Z) end})
-PJR:AddSlider("ProjVoidY", {Text="Void Y",Default=9000,Min=1000,Max=50000,Rounding=0,Suffix=" studs",Callback=function(v) Config.ProjectileVoidPos=Vector3.new(Config.ProjectileVoidPos.X,v,Config.ProjectileVoidPos.Z) end})
-PJR:AddSlider("ProjVoidZ", {Text="Void Z",Default=9000,Min=1000,Max=50000,Rounding=0,Suffix=" studs",Callback=function(v) Config.ProjectileVoidPos=Vector3.new(Config.ProjectileVoidPos.X,Config.ProjectileVoidPos.Y,v) end})
-
--- ═══════════════════════════════════════════
--- TAB 3 ── PREDICTION (LOCAL PLAYER TO VOID)
--- ═══════════════════════════════════════════
-local PDL = Tabs.Prediction:AddLeftGroupbox("Prediction Settings",  "crosshair")
-local PDR = Tabs.Prediction:AddRightGroupbox("Behaviour Presets",   "settings")
-
-PDL:AddToggle("PredEnabled", {
-    Text    = "Enable Prediction",
-    Default = false,
-    Tooltip = "Sends YOUR character to the void at the predicted enemy position",
-    Callback = function(v)
-        Config.PredictionEnabled = v
-        if v then startPredVoid() else stopPredVoid() predCache = {} end
-        Library:Notify(v and "Prediction ON — YOU go to void" or "Prediction OFF", 3)
-    end,
-})
-PDL:AddDivider()
-PDL:AddLabel("YOUR HumanoidRootPart is sent to void")
-PDL:AddLabel("at the predicted X/Z of the nearest enemy")
-PDL:AddLabel("Y is set to your configured void height")
-PDL:AddDivider()
-PDL:AddDropdown("PredMethodDD", {
-    Values   = {"Velocity Only","Velocity + Accel","Kalman"},
-    Default  = "Velocity + Accel",
-    Text     = "Prediction Method",
-    Callback = function(v) Config.PredictionMethod = v predCache = {} end,
-})
-PDL:AddSlider("PredStr",    {Text="Lead Time",     Default=0.09,  Min=0,   Max=0.5, Rounding=3,Suffix="s",     Callback=function(v) Config.PredictionStrength=v     end})
-PDL:AddSlider("PredLat",    {Text="Latency Comp",  Default=0.055, Min=0,   Max=0.3, Rounding=3,Suffix="s",     Callback=function(v) Config.PredictionLatency=v      end})
-PDL:AddSlider("PredLead",   {Text="Max Lead",      Default=6,     Min=1,   Max=30,  Rounding=1,Suffix=" studs",Callback=function(v) Config.PredictionMaxLead=v      end})
-PDL:AddSlider("PredSmooth", {Text="Smoothing",     Default=0.45,  Min=0,   Max=1,   Rounding=2,               Callback=function(v) Config.PredictionSmoothFactor=v  end})
-PDL:AddCheckbox("PredAdapt",{Text="Adaptive Lead", Default=true,                                               Callback=function(v) Config.PredictionAdaptive=v     end})
-PDL:AddSlider("PredVoidY",  {
-    Text     = "Void Y (your depth)",
-    Default  = 9000,
-    Min      = -2000,
-    Max      = 50000,
-    Rounding = 0,
-    Suffix   = " Y",
-    Tooltip  = "How deep underground your character goes",
-    Callback = function(v)
-        Config.VoidPos = Vector3.new(Config.VoidPos.X, v, Config.VoidPos.Z)
-    end,
-})
-PDL:AddDivider()
-PDL:AddButton({Text="Reset Prediction Cache", Func=function()
-    predCache = {}
-    Library:Notify("Prediction cache cleared", 3)
-end})
-
-PDR:AddButton({Text="Slingshot HvH", Func=function()
-    Config.PredictionMethod       = "Velocity + Accel"
-    Config.PredictionStrength     = 0.09
-    Config.PredictionLatency      = 0.055
-    Config.PredictionMaxLead      = 6
-    Config.PredictionSmoothFactor = 0.45
-    Config.PredictionAdaptive     = true
-    predCache = {}
-    Library:Notify("Preset: Slingshot HvH", 3)
-end})
-PDR:AddButton({Text="Bow Long Range", Func=function()
-    Config.PredictionMethod       = "Velocity + Accel"
-    Config.PredictionStrength     = 0.18
-    Config.PredictionLatency      = 0.07
-    Config.PredictionMaxLead      = 12
-    Config.PredictionSmoothFactor = 0.55
-    predCache = {}
-    Library:Notify("Preset: Bow Long Range", 3)
-end})
-PDR:AddButton({Text="High Ping", Func=function()
-    Config.PredictionStrength     = 0.12
-    Config.PredictionLatency      = 0.12
-    Config.PredictionMaxLead      = 10
-    Config.PredictionSmoothFactor = 0.5
-    predCache = {}
-    Library:Notify("Preset: High Ping", 3)
-end})
-PDR:AddButton({Text="Max Aggression", Func=function()
-    Config.PredictionMethod       = "Velocity + Accel"
-    Config.PredictionStrength     = 0.3
-    Config.PredictionLatency      = 0.1
-    Config.PredictionMaxLead      = 20
-    Config.PredictionSmoothFactor = 0.2
-    Config.PredictionAdaptive     = false
-    predCache = {}
-    Library:Notify("Preset: Max Aggression", 3)
-end})
-PDR:AddButton({Text="Stable / Low Ping", Func=function()
-    Config.PredictionMethod       = "Velocity Only"
-    Config.PredictionStrength     = 0.05
-    Config.PredictionLatency      = 0.03
-    Config.PredictionMaxLead      = 4
-    Config.PredictionSmoothFactor = 0.6
-    Config.PredictionAdaptive     = true
-    predCache = {}
-    Library:Notify("Preset: Stable / Low Ping", 3)
-end})
-
--- ═══════════════════════════════════════════
--- TAB 4 ── HIT REG + WEAPONS
--- ═══════════════════════════════════════════
-local HRL = Tabs.HitWeapons:AddLeftGroupbox("Hit Registration", "target")
-local HRR = Tabs.HitWeapons:AddRightGroupbox("Weapon Bypasses", "sword")
-
-HRL:AddToggle("HitRegEnabled", {
-    Text    = "Enable Hit Reg",
-    Default = false,
-    Tooltip = "6-ray multi-cast on CoreProjectile",
-    Callback = function(v)
-        Config.HitRegEnabled = v
-        if v then startHitReg() else stopHitReg() end
-    end,
-})
-HRL:AddSlider("HitStr",      {Text="Strength %",     Default=79,Min=0,Max=100,Rounding=0,Suffix="%",       Callback=function(v) Config.HitRegStrength=v end})
-HRL:AddCheckbox("FreezeFoes",{Text="Freeze Enemies", Default=true,                                          Callback=function(v) Config.FreezeEnemies=v  end})
-HRL:AddCheckbox("VoidHitProjCB",{Text="Void Projectile",Default=true,                                       Callback=function(v) Config.VoidHitProj=v    end})
-HRL:AddCheckbox("HRDebugCB", {Text="Debug Console",  Default=false,                                         Callback=function(v) Config.ShowDebug=v       end})
-HRL:AddDivider()
-HRL:AddButton({Text="79% Recommended", Func=function() Config.HitRegStrength=79  Library:Notify("Hit Reg: 79%",2)  end})
-HRL:AddButton({Text="100% Never Miss",  Func=function() Config.HitRegStrength=100 Library:Notify("Hit Reg: 100%",2) end})
-HRL:AddButton({Text="75% Safe",         Func=function() Config.HitRegStrength=75  Library:Notify("Hit Reg: 75%",2)  end})
-HRL:AddDivider()
-HRL:AddButton({Text="🔥 OP Mode", Func=function()
-    Config.HitRegEnabled=true Config.HitRegStrength=79
-    Config.FreezeEnemies=true Config.VoidHitProj=true
-    startHitReg()
-    Config.SlingshotEnabled=true Config.SlingshotSpeed=300
-    Config.BowEnabled=true Config.DaggersEnabled=true
-    Config.GunbladeEnabled=true Config.WeaponSpeed=300
-    applyAllWeapons()
-    Library:Notify("🔥 OP Mode active", 4)
-end})
-HRL:AddButton({Text="Show Hit Stats", Func=function()
-    local pct = shotTotal > 0 and math.floor(hitTotal/shotTotal*100) or 0
-    Library:Notify(string.format("Hits: %d | Shots: %d | %d%%", hitTotal, shotTotal, pct), 6)
-end})
-HRL:AddButton({Text="Reset Stats", Func=function() hitTotal=0 shotTotal=0 Library:Notify("Stats cleared",2) end})
-
-HRR:AddCheckbox("SlingshotCB",  {Text="Slingshot Bypass",Default=false,Callback=function(v) Config.SlingshotEnabled=v  applyWeaponBypass("Slingshot",v,Config.SlingshotSpeed) end})
-HRR:AddSlider("SlingSp",        {Text="Slingshot Speed %",Default=300,Min=0,Max=300,Rounding=0,Suffix="%",Callback=function(v) Config.SlingshotSpeed=v if Config.SlingshotEnabled then applyWeaponBypass("Slingshot",true,v) end end})
-HRR:AddDivider()
-HRR:AddCheckbox("BowCB",        {Text="Bow Bypass",    Default=false,Callback=function(v) Config.BowEnabled=v     applyWeaponBypass("Bow",v,Config.WeaponSpeed)      end})
-HRR:AddCheckbox("DaggersCB",    {Text="Daggers Bypass",Default=false,Callback=function(v) Config.DaggersEnabled=v  applyWeaponBypass("Daggers",v,Config.WeaponSpeed)  end})
-HRR:AddCheckbox("GunbladeCB",   {Text="Gunblade Bypass",Default=false,Callback=function(v) Config.GunbladeEnabled=v applyWeaponBypass("Gunblade",v,Config.WeaponSpeed) end})
-HRR:AddSlider("WeapSp",         {Text="Bow/Daggers/Gunblade %",Default=300,Min=0,Max=300,Rounding=0,Suffix="%",Callback=function(v) Config.WeaponSpeed=v applyAllWeapons() end})
-HRR:AddDivider()
-HRR:AddButton({Text="All → 300% Rage", Func=function() Config.WeaponSpeed=300 Config.SlingshotSpeed=300 applyAllWeapons() Library:Notify("All: 300%",3) end})
-HRR:AddButton({Text="All → 200% Fast", Func=function() Config.WeaponSpeed=200 Config.SlingshotSpeed=200 applyAllWeapons() Library:Notify("All: 200%",3) end})
-HRR:AddButton({Text="Reset All",       Func=function() resetAllWeapons() Library:Notify("Weapons reset",3) end})
-
--- ═══════════════════════════════════════════
--- TAB 5 ── ANTI RIOT + JITTER
--- ═══════════════════════════════════════════
-local ARL = Tabs.AntiJitter:AddLeftGroupbox("Anti Riot",   "shield")
-local ARR = Tabs.AntiJitter:AddRightGroupbox("Void Jitter","shuffle")
-
-ARL:AddButton({Text="🔥 Enable Both", Func=function()
-    Config.AntiRiotEnabled=true startAntiRiot()
-    Config.VoidJitterEnabled=true Config.VoidJitterIntensity=5 Config.VoidJitterRate=2 startVoidJitter()
-    Library:Notify("Anti Riot + Jitter ON", 4)
-end})
-ARL:AddToggle("AntiRiotCB", {
-    Text    = "Enable Anti Riot",
-    Default = false,
-    Tooltip = "Voids players holding riot/shield tools",
-    Callback = function(v)
-        Config.AntiRiotEnabled = v
-        if v then startAntiRiot() else stopAntiRiot() end
-        Library:Notify(v and "Anti Riot ON" or "Anti Riot OFF", 3)
-    end,
-})
-ARL:AddLabel("Voids players holding riot/shield tools")
-
-ARR:AddToggle("VoidJitterCB", {
-    Text    = "Enable Void Jitter",
-    Default = false,
-    Tooltip = "Jitters enemy void position to corrupt bypass scripts",
-    Callback = function(v)
-        Config.VoidJitterEnabled = v
-        if v then startVoidJitter() else stopVoidJitter() end
-        Library:Notify(v and "Jitter ON" or "Jitter OFF", 3)
-    end,
-})
-ARR:AddSlider("JitInt",  {Text="Intensity",     Default=5,Min=1,Max=20, Rounding=0,Suffix=" studs",Callback=function(v) Config.VoidJitterIntensity=v end})
-ARR:AddSlider("JitRate", {Text="Rate (frames)", Default=2,Min=1,Max=10, Rounding=0,              Callback=function(v) Config.VoidJitterRate=v      end})
-ARR:AddDivider()
-ARR:AddButton({Text="Aggressive",Func=function() Config.VoidJitterIntensity=10 Config.VoidJitterRate=1 Library:Notify("Jitter: Aggressive",3) end})
-ARR:AddButton({Text="Balanced",  Func=function() Config.VoidJitterIntensity=5  Config.VoidJitterRate=2 Library:Notify("Jitter: Balanced",3)   end})
-ARR:AddButton({Text="Subtle",    Func=function() Config.VoidJitterIntensity=2  Config.VoidJitterRate=4 Library:Notify("Jitter: Subtle",3)     end})
-
--- ═══════════════════════════════════════════
--- TAB 6 ── ORBIT RAGEBOT
--- ═══════════════════════════════════════════
-local OL = Tabs.Orbit:AddLeftGroupbox("Orbit Ragebot", "circle")
-local OR = Tabs.Orbit:AddRightGroupbox("Orbit Tuning", "settings")
-
-OL:AddToggle("OrbitCB", {
-    Text    = "Enable Orbit",
-    Default = false,
-    Callback = function(v)
-        Config.OrbitEnabled = v
-        if v then startOrbitRagebot() else stopOrbitRagebot() end
-        Library:Notify(v and "Orbit ON" or "Orbit OFF", 3)
-    end,
-})
-OL:AddCheckbox("OAura",  {Text="Orbit Aura (around head)", Default=true, Tooltip="Orbits target around their own head",   Callback=function(v) Config.OrbitAura=v           end})
-OL:AddCheckbox("OResolv",{Text="Orbit Resolver",           Default=true,                                                  Callback=function(v) Config.OrbitResolver=v       end})
-OL:AddCheckbox("OARiot", {Text="Orbit Anti Riot",          Default=true,                                                  Callback=function(v) Config.OrbitAntiRiot=v       end})
-OL:AddCheckbox("OAProj", {Text="Orbit Anti Projectile",    Default=true,                                                  Callback=function(v) Config.OrbitAntiProjectile=v end})
-OL:AddCheckbox("OStrike",{Text="Strike On Melee",          Default=true,                                                  Callback=function(v) Config.OrbitStrikeOnMelee=v  end})
-OL:AddCheckbox("OSmart", {Text="Smart Mode",               Default=true,                                                  Callback=function(v) Config.OrbitSmartMode=v      end})
-OL:AddDivider()
-OL:AddButton({Text="vs Sniper",   Func=function() Config.OrbitSpeed=80  Config.OrbitRadius=12 Config.OrbitSmartMode=false Library:Notify("Orbit: vs Sniper",3)   end})
-OL:AddButton({Text="vs Shotgun",  Func=function() Config.OrbitSpeed=120 Config.OrbitRadius=15 Config.OrbitSmartMode=false Library:Notify("Orbit: vs Shotgun",3)  end})
-OL:AddButton({Text="vs Melee",    Func=function() Config.OrbitSpeed=60  Config.OrbitRadius=6  Config.OrbitSmartMode=false Library:Notify("Orbit: vs Melee",3)    end})
-OL:AddButton({Text="vs Slingshot",Func=function() Config.OrbitSpeed=90  Config.OrbitRadius=10 Config.OrbitSmartMode=true  Library:Notify("Orbit: vs Slingshot",3) end})
-OL:AddButton({Text="Smart Auto",  Func=function() Config.OrbitSpeed=50  Config.OrbitRadius=8  Config.OrbitSmartMode=true  Library:Notify("Orbit: Smart Auto",3)   end})
-
-OR:AddSlider("OTPDelay", {Text="TP Delay",      Default=1.3,Min=0,  Max=5,   Rounding=2,Suffix="s",      Callback=function(v) Config.OrbitTPDelay=v      end})
-OR:AddSlider("OShotInt", {Text="Shot Interval", Default=0.4,Min=0,  Max=2,   Rounding=2,Suffix="s",      Callback=function(v) Config.OrbitShotInterval=v end})
-OR:AddSlider("ORadius",  {Text="Orbit Radius",  Default=8,  Min=1,  Max=30,  Rounding=1,Suffix=" studs", Callback=function(v) Config.OrbitRadius=v       end})
-OR:AddSlider("OSpeed",   {Text="Orbit Speed",   Default=50, Min=10, Max=200, Rounding=0,Suffix=" deg/s", Callback=function(v) Config.OrbitSpeed=v        end})
-OR:AddDivider()
-OR:AddLabel("Aura orbits around target HEAD position")
-OR:AddLabel("Orbit center = Head.Position when available")
-OR:AddLabel("Falls back to HumanoidRootPart if no head")
-
--- ═══════════════════════════════════════════
--- TAB 7 ── VOID SPAM
--- ═══════════════════════════════════════════
-local VSL = Tabs.VoidSpam:AddLeftGroupbox("Void Spam Ragebot", "zap")
-local VSR = Tabs.VoidSpam:AddRightGroupbox("Timing",           "clock")
-
-VSL:AddToggle("VoidSpamCB", {
-    Text    = "Enable Void Spam",
-    Default = false,
-    Callback = function(v)
-        Config.VoidSpamEnabled = v
-        if v then startVoidSpam() else stopVoidSpam() end
-        Library:Notify(v and "Void Spam ON" or "Void Spam OFF", 3)
-    end,
-})
-VSL:AddLabel("Hide underground → Snap → Shoot → Return")
-VSL:AddDivider()
-VSL:AddButton({Text="Default (0.25/0.1/1)",   Func=function() Config.VoidSpamHide=0.25 Config.VoidSpamAttack=0.1  Config.VoidSpamShots=1 Library:Notify("VS: Default",3)    end})
-VSL:AddButton({Text="Aggressive (0.1/0.05/3)",Func=function() Config.VoidSpamHide=0.1  Config.VoidSpamAttack=0.05 Config.VoidSpamShots=3 Library:Notify("VS: Aggressive",3) end})
-VSL:AddButton({Text="Safe (0.4/0.2/1)",       Func=function() Config.VoidSpamHide=0.4  Config.VoidSpamAttack=0.2  Config.VoidSpamShots=1 Library:Notify("VS: Safe",3)       end})
-VSL:AddButton({Text="Force Stop Cycle", Func=function()
-    stopVoidSpam()
-    Config.VoidSpamRunning = false
-    local myChar = LP.Character
-    local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    if myHRP then
-        local sp = workspace:FindFirstChild("SpawnLocation")
-        if sp then myHRP.CFrame = sp.CFrame + Vector3.new(0, 3, 0) end
-    end
-    Library:Notify("Void Spam: Force stopped", 3)
-end})
-
-VSR:AddDropdown("VSPriority",{Values={"Closest","LowHP","HighHP"},Default="Closest",Text="Target Priority",Callback=function(v) Config.VoidSpamPriority=v Library:Notify("Priority: "..v,3) end})
-VSR:AddSlider("VSHide", {Text="Hide Duration",   Default=0.25,Min=0,   Max=2,    Rounding=2,Suffix="s",Callback=function(v) Config.VoidSpamHide=v   end})
-VSR:AddSlider("VSAtk",  {Text="Attack Duration", Default=0.1, Min=0,   Max=1,    Rounding=2,Suffix="s",Callback=function(v) Config.VoidSpamAttack=v end})
-VSR:AddSlider("VSShots",{Text="Shots per Cycle", Default=1,   Min=1,   Max=5,    Rounding=0,           Callback=function(v) Config.VoidSpamShots=v  end})
-VSR:AddSlider("VSVoidY",{Text="Underground Y",   Default=-500,Min=-2000,Max=-100,Rounding=0,Suffix=" Y",Callback=function(v) Config.VoidSpamVoidY=v end})
-
--- ═══════════════════════════════════════════
--- TAB 8 ── AVATAR
--- ═══════════════════════════════════════════
-local AVL = Tabs.Avatar:AddLeftGroupbox("Victim Settings", "user")
-local AVR = Tabs.Avatar:AddRightGroupbox("Stats + Status", "bar-chart")
-
-AVL:AddInput("AvVictimID", {Default="",Text="Victim User ID",Placeholder="Roblox User ID...",Numeric=true,Finished=true,Callback=function(v)
-    local id = tonumber(v)
-    if id then Config.AvatarVictimId = id Library:Notify("ID: "..id, 3) end
-end})
-AVL:AddInput("AvHelper",{Default="",Text="Helper Username",Placeholder="Leave empty for yourself...",Finished=true,Callback=function(v) Config.AvatarHelper=v end})
-AVL:AddDropdown("AvPlatform",{Values={"DESKTOP","MOBILE","CONSOLE","VR"},Default="DESKTOP",Text="Platform",Callback=function(v) Config.AvatarPlatform=v end})
-AVL:AddDivider()
-AVL:AddButton({Text="▶ Apply Avatar",Func=function() startAvatar() end})
-AVL:AddButton({Text="■ Stop Avatar", Func=function() stopAvatar() Library:Notify("Avatar stopped",3) end})
-AVL:AddButton({Text="Preview Victim",Func=function()
-    if Config.AvatarVictimId == 0 then Library:Notify("Enter an ID first",3) return end
-    pcall(function()
-        local d = HttpService:JSONDecode(game:HttpGet("https://users.roblox.com/v1/users/"..Config.AvatarVictimId,true))
-        Library:Notify("Name: "..d.name.." | "..d.displayName.." | ID: "..d.id, 6)
-    end)
-end})
-
-AVR:AddSlider("AvLevel", {Text="Level",       Default=1,  Min=1,   Max=1000,  Rounding=0,Suffix=" lvl",  Callback=function(v) Config.AvatarLevel=v  end})
-AVR:AddSlider("AvStreak",{Text="Win Streak",  Default=0,  Min=0,   Max=500,   Rounding=0,Suffix=" wins", Callback=function(v) Config.AvatarStreak=v end})
-AVR:AddSlider("AvElo",   {Text="ELO (0=off)", Default=0,  Min=0,   Max=10000, Rounding=0,Suffix=" elo",  Callback=function(v) Config.AvatarElo=v    end})
-AVR:AddSlider("AvKeys",  {Text="Keys (0=off)",Default=0,  Min=0,   Max=9999,  Rounding=0,Suffix=" keys", Callback=function(v) Config.AvatarKeys=v   end})
-AVR:AddDivider()
-AVR:AddCheckbox("AvPrem",  {Text="Spoof Premium",       Default=false,Callback=function(v) Config.AvatarPremium=v   end})
-AVR:AddCheckbox("AvVerif", {Text="Spoof Verified Badge",Default=false,Callback=function(v) Config.AvatarVerified=v  end})
-AVR:AddCheckbox("AvUnlock",{Text="Unlock All",          Default=false,Callback=function(v) Config.AvatarUnlockAll=v end})
-
--- ═══════════════════════════════════════════
--- TAB 9 ── SETTINGS
--- ═══════════════════════════════════════════
-local SEL = Tabs.Settings:AddLeftGroupbox("Emergency",    "alert-triangle")
-local SER = Tabs.Settings:AddRightGroupbox("Setup Guide", "info")
-
-SEL:AddButton({Text="🛑 Force Stop Everything", Func=function()
-    stopBypass()
-    stopProjectile()
-    stopPredVoid()
-    stopHitReg()
-    stopAntiRiot()
-    stopVoidJitter()
-    stopOrbitRagebot()
-    stopVoidSpam()
-    resetAllWeapons()
-    if avatarActive then stopAvatar() end
-    predCache             = {}
-    tracked               = {}
-    projTracked           = {}
-    Config.VoidSpamRunning = false
-    Library:Notify("ALL SYSTEMS STOPPED", 5)
-end})
-SEL:AddDivider()
-SEL:AddButton({Text="Reset Pred Cache",    Func=function() predCache={} Library:Notify("Cache cleared",2)               end})
-SEL:AddButton({Text="Rebuild Player Cache",Func=function() rebuildCache() Library:Notify(#playerCache.." players cached",3) end})
-SEL:AddButton({Text="Scan CoreProjectiles",Func=function()
-    local count = 0
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj.Name == "CoreProjectile" and obj:IsA("BasePart") then
-            projTracked[obj] = true count = count + 1
-        end
-    end
-    Library:Notify("Scanned: "..count.." CoreProjectile(s)", 4)
-end})
-
-SER:AddLabel("Recommended HvH Setup:")
-SER:AddLabel("1. Bypass ON — All Enemies")
-SER:AddLabel("2. Projectile ON — CoreProjectile void")
-SER:AddLabel("3. Prediction ON — Slingshot HvH preset")
-SER:AddLabel("4. Hit Reg 79% + all weapons 300%")
-SER:AddLabel("5. Anti Riot + Jitter Balanced")
-SER:AddLabel("6. Orbit Smart Mode + Aura ON")
-SER:AddLabel("7. Void Spam Default + Closest")
-SER:AddDivider()
-SER:AddLabel("Projectile tracks: CoreProjectile only")
-SER:AddLabel("Prediction: YOUR character goes to void")
-SER:AddLabel("Orbit Aura: circles around target Head")
-
--- ── Theme + Save ──
-if ThemeManager then
-    ThemeManager:SetLibrary(Library)
-    pcall(function() ThemeManager:BuildThemeSection(Tabs.Settings) end)
-end
-if SaveManager then
-    SaveManager:SetLibrary(Library)
-    pcall(function()
-        SaveManager:IgnoreThemeSettings()
-        SaveManager:SetIgnoreIndexes({})
-        SaveManager:SetFolder("rivals_bypass")
-        SaveManager:BuildConfigSection(Tabs.Settings)
-    end)
-end
-
--- ═══════════════════════════════════════════
--- UNIFIED CHARACTER ADDED HOOK
--- ═══════════════════════════════════════════
-LP.CharacterAdded:Connect(function()
-    predCache             = {}
-    tracked               = {}
-    projTracked           = {}
-    nearestEnemyCache     = nil
-    nearestEnemyCacheTime = 0
-    updateFilter()
-    Config.VoidSpamRunning = false
-    task.wait(0.5)
-    rebuildCache()
-
-    if Config.BypassEnabled     then task.wait(0.5) startBypass()       end
-    if Config.ProjectileEnabled then task.wait(0.5) startProjectile()   end
-    if Config.PredictionEnabled then task.wait(0.5) startPredVoid()     end
-    if Config.HitRegEnabled     then task.wait(0.5) startHitReg()       end
-    if Config.AntiRiotEnabled   then task.wait(0.5) startAntiRiot()     end
-    if Config.VoidJitterEnabled then task.wait(0.5) startVoidJitter()   end
-    if Config.OrbitEnabled      then task.wait(0.5) startOrbitRagebot() end
-    if Config.VoidSpamEnabled   then task.wait(0.5) startVoidSpam()     end
-    applyAllWeapons()
 end)
 
--- ═══════════════════════════════════════════
--- INIT
--- ═══════════════════════════════════════════
-Library:Notify("yux/overkill loaded successfully!", 5)
+workspace.ChildRemoved:Connect(function(obj)
+    trackedParts[obj] = nil
+end)
 
-if Config.BypassEnabled     then startBypass()       end
-if Config.ProjectileEnabled then startProjectile()   end
-if Config.PredictionEnabled then startPredVoid()     end
-if Config.HitRegEnabled     then startHitReg()       end
-if Config.AntiRiotEnabled   then startAntiRiot()     end
-if Config.VoidJitterEnabled then startVoidJitter()   end
-if Config.OrbitEnabled      then startOrbitRagebot() end
-if Config.VoidSpamEnabled   then startVoidSpam()     end
-applyAllWeapons()
+--// STRONG VOID SPAM (Using your method + improvements)
+local function strongVoid()
+    if not features.VoidSpam then return end
+    pcall(function()
+        -- Void Enemy Players
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                local root = plr.Character:FindFirstChild("HumanoidRootPart")
+                if root then
+                    root.CFrame = VoidCFrame
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                    root.Velocity = Vector3.zero
+                end
+                
+                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                if hum then hum.Health = 0 end
+            end
+        end
+
+        -- Void Projectiles in workspace
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if (obj:IsA("BasePart") or obj:IsA("MeshPart")) and obj.Name == "CoreProjectile" then
+                obj.CFrame = VoidCFrame
+                obj.AssemblyLinearVelocity = Vector3.zero
+            end
+        end
+
+        -- Void Tracked Fast Projectiles
+        for part in pairs(trackedParts) do
+            if part and part.Parent then
+                part.CFrame = VoidCFrame
+                part.AssemblyLinearVelocity = Vector3.zero
+                part.AssemblyAngularVelocity = Vector3.zero
+            else
+                trackedParts[part] = nil
+            end
+        end
+    end)
+end
+
+RunService.Heartbeat:Connect(strongVoid)
+
+--// Reliable Auto Shoot (Especially for Sling)
+local function autoShoot()
+    pcall(function()
+        local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+        if not tool then return end
+
+        local toolName = tool.Name:lower()
+        if not (toolName:find("sling") or toolName:find("dagger") or toolName:find("knife") 
+                or toolName:find("blade") or toolName:find("throw")) then return end
+
+        -- Force activate
+        tool:Activate()
+
+        -- Fire every possible remote
+        for _, v in ipairs(tool:GetDescendants()) do
+            if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
+                local n = v.Name:lower()
+                if n:find("shoot") or n:find("fire") or n:find("throw") or n:find("attack") 
+                   or n:find("cast") or n:find("launch") then
+                    pcall(function() v:FireServer() end)
+                end
+            end
+        end
+    end)
+end
+
+RunService.Heartbeat:Connect(autoShoot)
+
+--// Improved Sling + Dagger Bypass
+local function applyBypass()
+    pcall(function()
+        local mt = getrawmetatable(game)
+        local old = mt.__namecall
+        setreadonly(mt, false)
+
+        mt.__namecall = newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            if method == "FireServer" then
+                local args = {...}
+                local remoteName = self.Name:lower()
+                local argStr = tostring(args[1] or ""):lower()
+
+                -- SLING BYPASS (Stronger)
+                if features.SlingBypass and (remoteName:find("sling") or remoteName:find("shoot") or argStr:find("sling")) then
+                    if argStr:find(playerName) or argStr:find("owner") or argStr:find("self") or #args <= 3 then
+                        return old(self, ...)  -- Allow your shots
+                    else
+                        return  -- Block anti-cheat checks
+                    end
+                end
+
+                -- DAGGER BYPASS
+                if features.DaggerBypass and (remoteName:find("dagger") or remoteName:find("knife") 
+                    or remoteName:find("throw") or remoteName:find("blade")) then
+                    if argStr:find(playerName) or argStr:find("owner") then
+                        return old(self, ...)
+                    else
+                        return
+                    end
+                end
+            end
+            return old(self, ...)
+        end)
+
+        setreadonly(mt, true)
+    end)
+end
+
+applyBypass()
+
+--// Anti Close
+local function antiClose()
+    if not features.AntiClose then return end
+    local character = LocalPlayer.Character
+    if not character or not character:FindFirstChild("HumanoidRootPart") then return end
+    local hrp = character.HumanoidRootPart
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+            if (hrp.Position - plr.Character.HumanoidRootPart.Position).Magnitude < 20 then
+                hrp.CFrame = hrp.CFrame + hrp.CFrame.LookVector * 60 + Vector3.new(0, 30, 0)
+                break
+            end
+        end
+    end
+end
+RunService.Heartbeat:Connect(antiClose)
+
+--// GUI
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 340, 0, 300)
+MainFrame.Position = UDim2.new(0.5, -170, 0.5, -150)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0,12)
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1,0,0,50)
+Title.BackgroundTransparency = 1
+Title.Text = playerName:upper() .. " [VOID GOD]"
+Title.TextColor3 = Color3.new(1,1,1)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 22
+Title.Parent = MainFrame
+
+local function createBtn(text, yPos, key, icon)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0.92,0,0,50)
+    btn.Position = UDim2.new(0.04,0,0,yPos)
+    btn.BackgroundColor3 = features[key] and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(45,45,55)
+    btn.Text = "   "..icon.."  "..text..": " .. (features[key] and "ON" or "OFF")
+    btn.TextColor3 = Color3.new(1,1,1)
+    btn.Font = Enum.Font.GothamSemibold
+    btn.TextSize = 17
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.Parent = MainFrame
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0,10)
+
+    btn.MouseButton1Click:Connect(function()
+        features[key] = not features[key]
+        if features[key] then
+            btn.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+            btn.Text = "   "..icon.."  "..text..": ON"
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(45,45,55)
+            btn.Text = "   "..icon.."  "..text..": OFF"
+        end
+    end)
+end
+
+createBtn("VOID SPAM", 65, "VoidSpam", "â˜ ï¸")
+createBtn("SLING BYPASS", 125, "SlingBypass", "ðŸŸ¢")
+createBtn("DAGGER BYPASS", 185, "DaggerBypass", "ðŸ—¡ï¸")
+createBtn("ANTI CLOSE", 245, "AntiClose", "ðŸš¶")
+
+print("âœ… STRONG SLING + VOID VERSION LOADED")
